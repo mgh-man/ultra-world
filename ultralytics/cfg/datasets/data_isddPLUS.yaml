@@ -1,8 +1,8 @@
 # custom dataset
 path: /mnt/datasets/manfenglin/
 train: ./ISDD/images/trainval
-val: ./ISDD/images/test
-test: ./ISDD/images/test
+val: ./isdd+sii/images/test
+test: ./isdd+sii/images/test
 
 # number of classes
 

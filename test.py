@@ -34,4 +34,4 @@ data = dict(
 model = YOLOWorld("yolov8l-worldv2.yaml")
 # model = YOLOWorld("yolov8l-worldv2.pt")
 model.train(data=data, batch=8, epochs=150, trainer=WorldTrainerFromScratch, 
-            project='runs/ISDD/train:(train+val_isdd+val_text)-val:isdd_test-test:isdd_test', name='lv2-pkaloss7-3', device='3')
+            project='runs/ISDD/train:(train+val_isdd+val_text)-val:isdd_test-test:isdd_test', name='lv2-pkaloss7-3', device='2')

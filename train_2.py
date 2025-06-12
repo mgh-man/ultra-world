@@ -15,4 +15,4 @@ from ultralytics import YOLO
 model = YOLO("yolov8m.yaml")
 
 # Train the model on the COCO8 example dataset for 100 epochs
-results = model.train(data="data_isddPLUS.yaml", batch=8, epochs=150, project='runs/ISDD/train:(train+test)-val:val-test:val', name='mv2-pka6-4', device='3')
+results = model.train(data="data_isddPLUS.yaml", batch=8, epochs=150, project='runs/ISDD/train:(train+test)-val:val-test:val', name='mv2-no', device='2')
