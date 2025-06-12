@@ -85,8 +85,28 @@ class WorldTrainer(yolo.detect.DetectionTrainer):
 
         # NOTE: add text features
         texts = list(itertools.chain(*batch["texts"]))
+        # print(texts)
         text_token = self.clip.tokenize(texts).to(batch["img"].device)
+        # print(text_token)
         txt_feats = self.text_model.encode_text(text_token).to(dtype=batch["img"].dtype)  # torch.float32
+        # print(txt_feats)
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
         batch["txt_feats"] = txt_feats.reshape(len(batch["texts"]), -1, txt_feats.shape[-1])
+            # 获取文本特征并重塑维度
+        # txt_feats = batch["txt_feats"].to(batch["img"].device)
+        
+        # 动态计算中间维度
+        # batch_size = len(batch["texts"])
+        # total_elements = txt_feats.numel()
+
+        # feat_dim = txt_feats.shape[-1]
+        # elements_per_text = txt_feats.numel() // (batch_size * feat_dim)  # 整数除法保证维度匹配
+        
+        # 验证维度可整除性
+        # if total_elements % (batch_size * feat_dim) != 0:
+        #     raise ValueError(f"文本特征维度不匹配: 总元素数{total_elements} 无法被 batch_size×feat_dim({batch_size}×{feat_dim}={batch_size*feat_dim}) 整除")
+        
+        # elements_per_text = total_elements // (batch_size * feat_dim)
+        # batch["txt_feats"] = txt_feats.reshape(batch_size, elements_per_text, feat_dim)
+        # batch["txt_feats"] = txt_feats.reshape(len(batch["texts"]), -1, txt_feats.shape[-1])
         return batch

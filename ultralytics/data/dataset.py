@@ -322,7 +322,6 @@ class GroundingDataset(YOLODataset):
                 box[[1, 3]] /= float(h)
                 if box[2] <= 0 or box[3] <= 0:
                     continue
-
                 caption = img["caption"]
                 cat_name = " ".join([caption[t[0] : t[1]] for t in ann["tokens_positive"]])
                 if cat_name not in cat2id:

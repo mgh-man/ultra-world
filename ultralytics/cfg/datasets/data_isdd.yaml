@@ -1,0 +1,13 @@
+# custom dataset
+path: /mnt/datasets/manfenglin/
+# train: ./ISDD/images/train
+# val: ./ISDD/images/val
+# test: ./ISDD/images/test
+train: ./isddplus/images/train
+val: ./isddplus/images/val
+test: ./isddplus/images/test
+# number of classes
+nc: 1
+
+# class names
+names: ['ship']

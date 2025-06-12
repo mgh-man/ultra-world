@@ -1,5 +1,5 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,7 +12,164 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
+def extract_bbox_pixels(image, bboxes):
+    """
+    Extract pixels from the image within the given bounding boxes.
+    
+    Args:
+    - image: NumPy array representing the image.
+    - bboxes: List of bounding boxes, each a tuple (left, top, right, bottom).
+    
+    Returns:
+    - List of pixel arrays corresponding to each bounding box.
+    """
+    pixels_list = []
+    for bbox in bboxes:
+        left, top, right, bottom = bbox
+        # Ensure the bounding box coordinates are within image boundaries
+        clipped_left = max(0, int(round(left)))
+        clipped_top = max(0, int(round(top)))
+        clipped_right = min(image.shape[1], int(round(right)))
+        clipped_bottom = min(image.shape[0], int(round(bottom)))
 
+        # Extract pixels within the clipped bounding box
+        if clipped_right > clipped_left and clipped_bottom > clipped_top:
+            pixels = image[clipped_top:clipped_bottom, clipped_left:clipped_right]
+            pixels_list.append(pixels)
+            last_valid_pixels = pixels  # 更新上一个有效像素
+        else:
+            # pixels_list.append(last_valid_pixels)  
+            pixels_list.append(np.zeros((1, 1))) # Return an empty array if there's no valid region
+            
+    return pixels_list
+
+def adjust_boxes(pred_boxes, target_boxes):
+    """
+    Adjusts the predicted and target bounding boxes to have the same aspect ratio.
+    """
+    img_width, img_height = 640, 640  # Assuming a fixed image size of 640x640
+
+    adjusted_pred_boxes = []
+    adjusted_target_boxes = []
+
+    for box_pred, box_target in zip(pred_boxes, target_boxes):
+        # 以下自己写，使得两个box宽高一样
+        # pred_width = box_pred[2] - box_pred[0]
+        # pred_height = box_pred[3] - box_pred[1]
+        # target_width = box_target[2] - box_target[0]
+        # target_height = box_target[3] - box_target[1]
+        # width_cha = max(pred_width,target_width) - min(pred_width,target_width)
+        # height_cha = max(pred_height,target_height) - min(pred_height,target_height)
+        # if pred_width > target_width:
+        #     box_pred[2] = box_pred[2] - width_cha
+        # else:
+        #     box_target[2] = box_target[2] - width_cha
+
+        # if pred_height > target_height:
+        #     box_pred[3] = box_pred[3] - height_cha
+        # else:
+        #     box_target[3] = box_target[3] - height_cha
+        pred_center_width = (box_pred[2]+box_pred[0]) / 2
+        pred_center_height = (box_pred[3]+box_pred[1]) / 2
+        target_center_width = (box_target[2]+box_target[0]) / 2
+        target_center_height = (box_target[3]+box_target[1]) / 2
+        pred_width = box_pred[2] - box_pred[0]
+        pred_height = box_pred[3] - box_pred[1]
+        target_width = box_target[2] - box_target[0]
+        target_height = box_target[3] - box_target[1]
+        if pred_width > target_width:
+            box_pred[2] = pred_center_width + target_width / 2
+            box_pred[0] = pred_center_width - target_width / 2
+        else:
+            box_target[2] = target_center_width + pred_width / 2
+            box_target[0] = target_center_width - pred_width / 2
+
+        
+        if pred_height > target_height:
+            box_pred[3] = pred_center_height + target_height / 2
+            box_pred[1] = pred_center_height - target_height / 2
+        else:
+            box_target[3] = target_center_height + pred_height / 2
+            box_target[1] = target_center_height - pred_height / 2
+  
+        adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
+        adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
+        
+  
+        adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
+        adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
+
+    return adjusted_pred_boxes, adjusted_target_boxes
+
+def quick_adjust_boxes(pred_boxes, target_boxes):
+    """
+    Adjusts the predicted and target bounding boxes to have the same aspect ratio using NumPy for efficiency.
+    """
+    # 确保输入是NumPy数组
+    pred_boxes = np.array(pred_boxes)
+    target_boxes = np.array(target_boxes)
+    
+    # 预计算宽度和高度
+    pred_widths = pred_boxes[:, 2] - pred_boxes[:, 0]
+    pred_heights = pred_boxes[:, 3] - pred_boxes[:, 1]
+    target_widths = target_boxes[:, 2] - target_boxes[:, 0]
+    target_heights = target_boxes[:, 3] - target_boxes[:, 1]
+    
+    # 计算中心点
+    pred_centers_x = (pred_boxes[:, 2] + pred_boxes[:, 0]) / 2
+    pred_centers_y = (pred_boxes[:, 3] + pred_boxes[:, 1]) / 2
+    target_centers_x = (target_boxes[:, 2] + target_boxes[:, 0]) / 2
+    target_centers_y = (target_boxes[:, 3] + target_boxes[:, 1]) / 2
+    
+    # 创建调整后的边界框数组（如果不希望修改原数组，可以在这里创建副本）
+    adjusted_pred_boxes = pred_boxes.copy()
+    adjusted_target_boxes = target_boxes.copy()
+    
+    # 根据宽度和高度调整边界框
+    mask_wider = pred_widths > target_widths
+    mask_taller = pred_heights > target_heights
+    
+    adjusted_pred_boxes[mask_wider, 2] = pred_centers_x[mask_wider] + target_widths[mask_wider] / 2
+    adjusted_pred_boxes[mask_wider, 0] = pred_centers_x[mask_wider] - target_widths[mask_wider] / 2
+    adjusted_target_boxes[~mask_wider, 2] = target_centers_x[~mask_wider] + pred_widths[~mask_wider] / 2
+    adjusted_target_boxes[~mask_wider, 0] = target_centers_x[~mask_wider] - pred_widths[~mask_wider] / 2
+    
+    adjusted_pred_boxes[mask_taller, 3] = pred_centers_y[mask_taller] + target_heights[mask_taller] / 2
+    adjusted_pred_boxes[mask_taller, 1] = pred_centers_y[mask_taller] - target_heights[mask_taller] / 2
+    adjusted_target_boxes[~mask_taller, 3] = target_centers_y[~mask_taller] + pred_heights[~mask_taller] / 2
+    adjusted_target_boxes[~mask_taller, 1] = target_centers_y[~mask_taller] - pred_heights[~mask_taller] / 2
+
+    # 返回调整后的边界框列表（这里直接返回数组，也可以转换为列表）
+    return adjusted_pred_boxes.tolist(), adjusted_target_boxes.tolist()
+
+def pixel_difference_loss(img, pred_boxes, target_boxes):
+    """
+    Compute pixel difference loss for the corresponding regions of predicted and target boxes,
+    after adjusting them to have the same dimensions.
+    """
+    # Adjust boxes to have the same size
+    adjusted_pred_boxes, adjusted_target_boxes = quick_adjust_boxes(pred_boxes, target_boxes)
+
+    # Extract pixels
+    adjusted_pred_pixels_list = extract_bbox_pixels(img, adjusted_pred_boxes)
+    adjusted_target_pixels_list = extract_bbox_pixels(img, adjusted_target_boxes)
+
+    # Check for consistency
+    if len(adjusted_pred_pixels_list) != len(adjusted_target_pixels_list):
+        raise ValueError("Unequal number of adjusted boxes after resizing.")
+
+    total_difference = 0
+    for pred_pixels, target_pixels in zip(adjusted_pred_pixels_list, adjusted_target_pixels_list):
+        # Ensure both boxes have the same shape before taking the differenc
+        
+        # Compute absolute difference
+        if pred_pixels.shape == target_pixels.shape:
+            #避免了77和 78的情况，该手段防止了调整box越界情况
+            difference = np.abs(pred_pixels - target_pixels)
+            total_difference += difference.sum()
+
+    average_difference = total_difference / len(adjusted_pred_pixels_list)
+    return torch.tensor(average_difference)
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
@@ -96,7 +253,7 @@ class BboxLoss(nn.Module):
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask, mpdiou_hw=None):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
@@ -207,6 +364,13 @@ class v8DetectionLoss:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
+        
+        # # 修改为动态维度计算
+        # preds = []
+        # for xi in feats:
+        #     bs, _, h, w = xi.shape
+        #     preds.append(xi.view(bs, self.no, -1))  # 保持原始维度计算逻辑
+        # pred_distri, pred_scores = torch.cat(preds, 2).split((self.reg_max * 4, self.nc), 1)
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
@@ -247,11 +411,44 @@ class v8DetectionLoss:
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
+        # if fg_mask.sum():
+        #     target_bboxes /= stride_tensor
+        #     loss[0], loss[2] = self.bbox_loss(
+        #         pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+        #     )
         if fg_mask.sum():
+            # 初始化一个列表来存储每张图像的损失
+            losses_per_image = []
+
+            # 遍历批次中的所有图像
+            for i in range(batch['img'].size(0)):
+                # 获取图像信息
+                img = batch['img'][i, 0, :, :].detach().cpu().numpy()
+
+                # 确保此处的逻辑是针对单张图像的处理
+                pred_bboxes_np = pred_bboxes[fg_mask].detach().cpu().numpy()  # 确认这部分逻辑是否符合预期
+                target_bboxes_np = target_bboxes[fg_mask].detach().cpu().numpy()
+
+                # 计算单张图像的像素差异损失
+                new_loss_single_img = pixel_difference_loss(img, pred_bboxes_np, target_bboxes_np)
+                # new_loss_single_img = torch.tensor(new_loss_single_img, dtype=torch.float32, device=self.device)
+                new_loss_single_img = new_loss_single_img.clone().detach()
+                # 将每张图像的损失添加到列表中
+                losses_per_image.append(new_loss_single_img)
+
+            # 循环结束后，取所有图像损失的平均值
+            new_loss = torch.mean(torch.stack(losses_per_image))
+            # print("*****new_loss****:",new_loss)
+            
+
+            # # 继续原有逻辑
             target_bboxes /= stride_tensor
-            loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
-            )
+            loss[0], loss[2] = self.bbox_loss(pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores,
+                                              target_scores_sum, fg_mask, ((imgsz[0] ** 2 + imgsz[1] ** 2) / torch.square(stride_tensor)).repeat(1, batch_size).transpose(1, 0))
+
+            # # 更新总损失，将平均损失加到原有损失上
+            loss[0] = 0.6* new_loss + 0.4* loss[0]
+
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain
