@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import numpy as np
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
@@ -50,6 +50,20 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "C2f_AP",
+    "WFU",
+    "CSP_MutilScaleEdgeInformationSelect",
+    "C2f_RAB",
+    'Zoom_cat',
+    'ScalSeq',
+    'DynamicScalSeq',
+    'Add',
+    'asf_attention_model',
+    "DySample",
+    "MANet",
+    "WaveletUnPool",
+    "WaveletPool",
+    "EUCB",
 )
 
 
@@ -1356,3 +1370,877 @@ class A2C2f(nn.Module):
         if self.gamma is not None:
             return x + self.gamma.view(-1, len(self.gamma), 1, 1) * y
         return y
+
+class APBottleneck(nn.Module):
+    """Asymmetric Padding bottleneck."""
+
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        """Initializes a bottleneck module with given input/output channels, shortcut option, group, kernels, and
+        expansion.
+        """
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        p = [(2,0,2,0),(0,2,0,2),(0,2,2,0),(2,0,0,2)]
+        self.pad = [nn.ZeroPad2d(padding=(p[g])) for g in range(4)]
+        self.cv1 = Conv(c1, c_ // 4, k[0], 1, p=0)
+        # self.cv1 = nn.ModuleList([nn.Conv2d(c1, c_, k[0], stride=1, padding= p[g], bias=False) for g in range(4)])
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """'forward()' applies the YOLO FPN to input data."""
+        # y = self.pad[g](x) for g in range(4)
+        return x + self.cv2((torch.cat([self.cv1(self.pad[g](x)) for g in range(4)], 1))) if self.add else self.cv2((torch.cat([self.cv1(self.pad[g](x)) for g in range(4)], 1)))
+
+class C2f_AP(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(APBottleneck(self.c, self.c, shortcut, g, k=(3, 3), e=e) for _ in range(n))
+
+
+######################################## ACMMM2024 Efficient Face Super-Resolution via Wavelet-based Feature Enhancement Network start ########################################
+
+class HaarWavelet(nn.Module):
+    def __init__(self, in_channels, grad=False):
+        super(HaarWavelet, self).__init__()
+        self.in_channels = in_channels
+
+        self.haar_weights = torch.ones(4, 1, 2, 2)
+        #h
+        self.haar_weights[1, 0, 0, 1] = -1
+        self.haar_weights[1, 0, 1, 1] = -1
+        #v
+        self.haar_weights[2, 0, 1, 0] = -1
+        self.haar_weights[2, 0, 1, 1] = -1
+        #d
+        self.haar_weights[3, 0, 1, 0] = -1
+        self.haar_weights[3, 0, 0, 1] = -1
+
+        self.haar_weights = torch.cat([self.haar_weights] * self.in_channels, 0)
+        self.haar_weights = nn.Parameter(self.haar_weights)
+        self.haar_weights.requires_grad = grad
+
+    def forward(self, x, rev=False):
+        if not rev:
+            out = F.conv2d(x, self.haar_weights, bias=None, stride=2, groups=self.in_channels) / 4.0
+            out = out.reshape([x.shape[0], self.in_channels, 4, x.shape[2] // 2, x.shape[3] // 2])
+            out = torch.transpose(out, 1, 2)
+            out = out.reshape([x.shape[0], self.in_channels * 4, x.shape[2] // 2, x.shape[3] // 2])
+            return out
+        else:
+            out = x.reshape([x.shape[0], 4, self.in_channels, x.shape[2], x.shape[3]])
+            out = torch.transpose(out, 1, 2)
+            out = out.reshape([x.shape[0], self.in_channels * 4, x.shape[2], x.shape[3]])
+            return F.conv_transpose2d(out, self.haar_weights, bias=None, stride=2, groups = self.in_channels)
+
+class WFU(nn.Module):
+    def __init__(self, chn):
+        super(WFU, self).__init__()
+        dim_big, dim_small = chn
+        self.dim = dim_big
+        self.HaarWavelet = HaarWavelet(dim_big, grad=False)
+        self.InverseHaarWavelet = HaarWavelet(dim_big, grad=False)
+        self.RB = nn.Sequential(
+            # nn.Conv2d(dim_big, dim_big, kernel_size=3, padding=1),
+            # nn.ReLU(),
+            Conv(dim_big, dim_big, 3),
+            nn.Conv2d(dim_big, dim_big, kernel_size=3, padding=1),
+        )
+
+        self.channel_tranformation = nn.Sequential(
+            # nn.Conv2d(dim_big+dim_small, dim_big+dim_small // 1, kernel_size=1, padding=0),
+            # nn.ReLU(),
+            Conv(dim_big+dim_small, dim_big+dim_small // 1, 1),
+            nn.Conv2d(dim_big+dim_small // 1, dim_big*3, kernel_size=1, padding=0),
+        )
+
+    def forward(self, x):
+        x_big, x_small = x
+        haar = self.HaarWavelet(x_big, rev=False)
+        a = haar.narrow(1, 0, self.dim)
+        h = haar.narrow(1, self.dim, self.dim)
+        v = haar.narrow(1, self.dim*2, self.dim) 
+        d = haar.narrow(1, self.dim*3, self.dim)
+
+        hvd = self.RB(h + v + d)
+        a_ = self.channel_tranformation(torch.cat([x_small, a], dim=1))
+        out = self.InverseHaarWavelet(torch.cat([hvd, a_], dim=1), rev=True)
+        return out
+
+######################################## ACMMM2024 Efficient Face Super-Resolution via Wavelet-based Feature Enhancement Network end ########################################
+######################################## MutilScaleEdgeInformationEnhance start ########################################
+
+# 1.使用 nn.AvgPool2d 对输入特征图进行平滑操作，提取其低频信息。
+# 2.将原始输入特征图与平滑后的特征图进行相减，得到增强的边缘信息（高频信息）。
+# 3.用卷积操作进一步处理增强的边缘信息。
+# 4.将处理后的边缘信息与原始输入特征图相加，以形成增强后的输出。
+class EdgeEnhancer(nn.Module):
+    def __init__(self, in_dim):
+        super().__init__()
+        self.out_conv = Conv(in_dim, in_dim, act=nn.Sigmoid())
+        self.pool = nn.AvgPool2d(3, stride= 1, padding = 1)
+    
+    def forward(self, x):
+        edge = self.pool(x)
+        edge = x - edge
+        edge = self.out_conv(edge)
+        return x + edge
+
+class MutilScaleEdgeInformationEnhance(nn.Module):
+    def __init__(self, inc, bins):
+        super().__init__()
+        
+        self.features = []
+        for bin in bins:
+            self.features.append(nn.Sequential(
+                nn.AdaptiveAvgPool2d(bin),
+                Conv(inc, inc // len(bins), 1),
+                Conv(inc // len(bins), inc // len(bins), 3, g=inc // len(bins))
+            ))
+        self.ees = []
+        for _ in bins:
+            self.ees.append(EdgeEnhancer(inc // len(bins)))
+        self.features = nn.ModuleList(self.features)
+        self.ees = nn.ModuleList(self.ees)
+        self.local_conv = Conv(inc, inc, 3)
+        self.final_conv = Conv(inc * 2, inc)
+    
+    def forward(self, x):
+        x_size = x.size()
+        out = [self.local_conv(x)]
+        for idx, f in enumerate(self.features):
+            out.append(self.ees[idx](F.interpolate(f(x), x_size[2:], mode='bilinear', align_corners=True)))
+        return self.final_conv(torch.cat(out, 1))
+
+class MutilScaleEdgeInformationSelect(nn.Module):
+    def __init__(self, inc, bins):
+        super().__init__()
+        
+        self.features = []
+        for bin in bins:
+            self.features.append(nn.Sequential(
+                nn.AdaptiveAvgPool2d(bin),
+                Conv(inc, inc // len(bins), 1),
+                Conv(inc // len(bins), inc // len(bins), 3, g=inc // len(bins))
+            ))
+        self.ees = []
+        for _ in bins:
+            self.ees.append(EdgeEnhancer(inc // len(bins)))
+        self.features = nn.ModuleList(self.features)
+        self.ees = nn.ModuleList(self.ees)
+        self.local_conv = Conv(inc, inc, 3)
+        self.dsm = DualDomainSelectionMechanism(inc * 2)
+        self.final_conv = Conv(inc * 2, inc)
+    
+    def forward(self, x):
+        x_size = x.size()
+        out = [self.local_conv(x)]
+        for idx, f in enumerate(self.features):
+            out.append(self.ees[idx](F.interpolate(f(x), x_size[2:], mode='bilinear', align_corners=True)))
+        return self.final_conv(self.dsm(torch.cat(out, 1)))
+
+class CSP_MutilScaleEdgeInformationEnhance(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(MutilScaleEdgeInformationEnhance(self.c, [3, 6, 9, 12]) for _ in range(n))
+
+class CSP_MutilScaleEdgeInformationSelect(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(MutilScaleEdgeInformationSelect(self.c, [3, 6, 9, 12]) for _ in range(n))        
+        
+######################################## MutilScaleEdgeInformationEnhance end ########################################
+class ChannelPool(nn.Module):
+    def forward(self, x):
+        return torch.cat( (torch.max(x,1)[0].unsqueeze(1), torch.mean(x,1).unsqueeze(1)), dim=1)
+    
+class DSM_SpatialGate(nn.Module):
+    def __init__(self, channel):
+        super(DSM_SpatialGate, self).__init__()
+        kernel_size = 3
+        self.compress = ChannelPool()
+        self.spatial = Conv(2, 1, kernel_size, act=False)
+        self.dw1 = nn.Sequential(
+            Conv(channel, channel, 5, s=1, d=2, g=channel, act=nn.GELU()),
+            Conv(channel, channel, 7, s=1, d=3, g=channel, act=nn.GELU())
+        )
+        self.dw2 = Conv(channel, channel, kernel_size, g=channel, act=nn.GELU())
+
+    def forward(self, x):
+        out = self.compress(x)
+        out = self.spatial(out)
+        out = self.dw1(x) * out + self.dw2(x)
+        return out
+    
+class DSM_LocalAttention(nn.Module):
+    def __init__(self, channel, p) -> None:
+        super().__init__()
+        self.channel = channel
+
+        self.num_patch = 2 ** p
+        self.sig = nn.Sigmoid()
+
+        self.a = nn.Parameter(torch.zeros(channel,1,1))
+        self.b = nn.Parameter(torch.ones(channel,1,1))
+
+    def forward(self, x):
+        out = x - torch.mean(x, dim=(2,3), keepdim=True)
+        return self.a*out*x + self.b*x
+
+class DualDomainSelectionMechanism(nn.Module):
+    # https://openaccess.thecvf.com/content/ICCV2023/papers/Cui_Focal_Network_for_Image_Restoration_ICCV_2023_paper.pdf
+    # https://github.com/c-yn/FocalNet
+    # Dual-DomainSelectionMechanism
+    def __init__(self, channel) -> None:
+        super().__init__()
+        pyramid = 1
+        self.spatial_gate = DSM_SpatialGate(channel)
+        layers = [DSM_LocalAttention(channel, p=i) for i in range(pyramid-1,-1,-1)]
+        self.local_attention = nn.Sequential(*layers)
+        self.a = nn.Parameter(torch.zeros(channel,1,1))
+        self.b = nn.Parameter(torch.ones(channel,1,1))
+        
+    def forward(self, x):
+        out = self.spatial_gate(x)
+        out = self.local_attention(out)
+        return self.a*out + self.b*x
+
+
+######################################## Dual residual attention network for image denoising start ########################################
+
+class CAB(nn.Module):
+    def __init__(self, nc, reduction=8, bias=False):
+        super(CAB, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv_du = nn.Sequential(
+                nn.Conv2d(nc, nc // reduction, kernel_size=1, padding=0, bias=bias),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(nc // reduction, nc, kernel_size=1, padding=0, bias=bias),
+                nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = self.conv_du(y)
+        return x * y
+
+class HDRAB(nn.Module):
+    def __init__(self, in_channels=64, out_channels=64, bias=True):
+        super(HDRAB, self).__init__()
+        kernel_size = 3
+        reduction = 8
+        reduction_2 = 2
+
+        self.cab = CAB(in_channels, reduction, bias)
+        
+        self.conv1x1_1 = nn.Conv2d(in_channels, in_channels // reduction_2, 1)
+
+        self.conv1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=1, dilation=1, bias=bias)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=2, dilation=2, bias=bias)
+
+        self.conv3 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=3, dilation=3, bias=bias)
+        self.relu3 = nn.ReLU(inplace=True)
+
+        self.conv4 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=4, dilation=4, bias=bias)
+
+        self.conv3_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=3, dilation=3, bias=bias)
+        self.relu3_1 = nn.ReLU(inplace=True)
+
+        self.conv2_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=2, dilation=2, bias=bias)
+
+        self.conv1_1 = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=1, dilation=1, bias=bias)
+        self.relu1_1 = nn.ReLU(inplace=True)
+
+        self.conv_tail = nn.Conv2d(in_channels // reduction_2, out_channels // reduction_2, kernel_size=kernel_size, padding=1, dilation=1, bias=bias)
+        
+        self.conv1x1_2 = nn.Conv2d(in_channels // reduction_2, in_channels, 1)
+
+    def forward(self, y):
+        y_d = self.conv1x1_1(y)
+        y1 = self.conv1(y_d)
+        y1_1 = self.relu1(y1)
+        y2 = self.conv2(y1_1)
+        y2_1 = y2 + y_d
+
+        y3 = self.conv3(y2_1)
+        y3_1 = self.relu3(y3)
+        y4 = self.conv4(y3_1)
+        y4_1 = y4 + y2_1
+
+        y5 = self.conv3_1(y4_1)
+        y5_1 = self.relu3_1(y5)
+        y6 = self.conv2_1(y5_1+y3)
+        y6_1 = y6 + y4_1
+
+        y7 = self.conv1_1(y6_1+y2_1)
+        y7_1 = self.relu1_1(y7)
+        y8 = self.conv_tail(y7_1+y1)
+        y8_1 = y8 + y6_1
+
+        y9 = self.cab(self.conv1x1_2(y8_1))
+        y9_1 = y + y9
+
+        return y9_1
+
+class C2f_HDRAB(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(HDRAB(self.c, self.c) for _ in range(n))
+
+class ChannelPool(nn.Module):
+    def __init__(self):
+        super(ChannelPool, self).__init__()
+
+    def forward(self, x):
+        return torch.cat((torch.max(x, 1)[0].unsqueeze(1), torch.mean(x, 1).unsqueeze(1)), dim=1)
+
+class SAB(nn.Module):
+    def __init__(self):
+        super(SAB, self).__init__()
+        kernel_size = 5
+        self.compress = ChannelPool()
+        self.spatial = Conv(2, 1, kernel_size)
+
+    def forward(self, x):
+        x_compress = self.compress(x)
+        x_out = self.spatial(x_compress)
+        scale = torch.sigmoid(x_out)
+        return x * scale
+
+class RAB(nn.Module):
+    def __init__(self, in_channels=64, out_channels=64, bias=True):
+        super(RAB, self).__init__()
+        kernel_size = 3
+        stride = 1
+        padding = 1
+        reduction_2 = 2
+        layers = []
+        layers.append(nn.Conv2d(in_channels// reduction_2, out_channels// reduction_2, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias))
+        layers.append(nn.ReLU(inplace=True))
+        layers.append(nn.Conv2d(in_channels// reduction_2, out_channels// reduction_2, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias))
+        self.res = nn.Sequential(*layers)
+        self.conv1x1_1 = nn.Conv2d(in_channels, in_channels // reduction_2, 1)
+        self.conv1x1_2 = nn.Conv2d(in_channels // reduction_2, in_channels, 1)
+        self.sab = SAB()
+
+    def forward(self, x):
+        x_d = self.conv1x1_1(x)
+        x1 = x_d + self.res(x_d)
+        x2 = x1 + self.res(x1)
+        x3 = x2 + self.res(x2)
+
+        x3_1 = x1 + x3
+        x4 = x3_1 + self.res(x3_1)
+        x4_1 = x_d + x4
+
+        x5 = self.sab(self.conv1x1_2(x4_1))
+        x5_1 = x + x5
+
+        return x5_1
+
+class C2f_RAB(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(RAB(self.c, self.c) for _ in range(n))
+
+######################################## Dual residual attention network for image denoising end ########################################
+
+######################################## Attentional Scale Sequence Fusion start ########################################
+
+class Zoom_cat(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        l, m, s = x[0], x[1], x[2]
+        tgt_size = m.shape[2:]
+        l = F.adaptive_max_pool2d(l, tgt_size) + F.adaptive_avg_pool2d(l, tgt_size)
+        s = F.interpolate(s, m.shape[2:], mode='nearest')
+        lms = torch.cat([l, m, s], dim=1)
+        return lms
+
+class ScalSeq(nn.Module):
+    def __init__(self, inc, channel):
+        super(ScalSeq, self).__init__()
+        if channel != inc[0]:
+            self.conv0 = Conv(inc[0], channel,1)
+        self.conv1 =  Conv(inc[1], channel,1)
+        self.conv2 =  Conv(inc[2], channel,1)
+        self.conv3d = nn.Conv3d(channel,channel,kernel_size=(1,1,1))
+        self.bn = nn.BatchNorm3d(channel)
+        self.act = nn.LeakyReLU(0.1)
+        self.pool_3d = nn.MaxPool3d(kernel_size=(3,1,1))
+
+    def forward(self, x):
+        p3, p4, p5 = x[0],x[1],x[2]
+        if hasattr(self, 'conv0'):
+            p3 = self.conv0(p3)
+        p4_2 = self.conv1(p4)
+        p4_2 = F.interpolate(p4_2, p3.size()[2:], mode='nearest')
+        p5_2 = self.conv2(p5)
+        p5_2 = F.interpolate(p5_2, p3.size()[2:], mode='nearest')
+        p3_3d = torch.unsqueeze(p3, -3)
+        p4_3d = torch.unsqueeze(p4_2, -3)
+        p5_3d = torch.unsqueeze(p5_2, -3)
+        combine = torch.cat([p3_3d, p4_3d, p5_3d],dim = 2)
+        conv_3d = self.conv3d(combine)
+        bn = self.bn(conv_3d)
+        act = self.act(bn)
+        x = self.pool_3d(act)
+        x = torch.squeeze(x, 2)
+        return x
+
+class DynamicScalSeq(nn.Module):
+    def __init__(self, inc, channel):
+        super(DynamicScalSeq, self).__init__()
+        if channel != inc[0]:
+            self.conv0 = Conv(inc[0], channel,1)
+        self.conv1 =  Conv(inc[1], channel,1)
+        self.conv2 =  Conv(inc[2], channel,1)
+        self.conv3d = nn.Conv3d(channel,channel,kernel_size=(1,1,1))
+        self.bn = nn.BatchNorm3d(channel)
+        self.act = nn.LeakyReLU(0.1)
+        self.pool_3d = nn.MaxPool3d(kernel_size=(3,1,1))
+        
+        self.dysample1 = DySample(channel, 2, 'lp')
+        self.dysample2 = DySample(channel, 4, 'lp')
+
+    def forward(self, x):
+        p3, p4, p5 = x[0],x[1],x[2]
+        if hasattr(self, 'conv0'):
+            p3 = self.conv0(p3)
+        p4_2 = self.conv1(p4)
+        p4_2 = self.dysample1(p4_2)
+        p5_2 = self.conv2(p5)
+        p5_2 = self.dysample2(p5_2)
+        p3_3d = torch.unsqueeze(p3, -3)
+        p4_3d = torch.unsqueeze(p4_2, -3)
+        p5_3d = torch.unsqueeze(p5_2, -3)
+        combine = torch.cat([p3_3d, p4_3d, p5_3d],dim = 2)
+        conv_3d = self.conv3d(combine)
+        bn = self.bn(conv_3d)
+        act = self.act(bn)
+        x = self.pool_3d(act)
+        x = torch.squeeze(x, 2)
+        return x
+
+class Add(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.sum(torch.stack(x, dim=0), dim=0)
+
+class asf_channel_att(nn.Module):
+    def __init__(self, channel, b=1, gamma=2):
+        super(asf_channel_att, self).__init__()
+        kernel_size = int(abs((math.log(channel, 2) + b) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, bias=False) 
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        y = self.avg_pool(x)
+        y = y.squeeze(-1)
+        y = y.transpose(-1, -2)
+        y = self.conv(y).transpose(-1, -2).unsqueeze(-1)
+        y = self.sigmoid(y)
+        return x * y.expand_as(x)
+    
+class asf_local_att(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(asf_local_att, self).__init__()
+        
+        self.conv_1x1 = nn.Conv2d(in_channels=channel, out_channels=channel//reduction, kernel_size=1, stride=1, bias=False)
+ 
+        self.relu   = nn.ReLU()
+        self.bn     = nn.BatchNorm2d(channel//reduction)
+ 
+        self.F_h = nn.Conv2d(in_channels=channel//reduction, out_channels=channel, kernel_size=1, stride=1, bias=False)
+        self.F_w = nn.Conv2d(in_channels=channel//reduction, out_channels=channel, kernel_size=1, stride=1, bias=False)
+ 
+        self.sigmoid_h = nn.Sigmoid()
+        self.sigmoid_w = nn.Sigmoid()
+ 
+    def forward(self, x):
+        _, _, h, w = x.size()
+        
+        x_h = torch.mean(x, dim = 3, keepdim = True).permute(0, 1, 3, 2)
+        x_w = torch.mean(x, dim = 2, keepdim = True)
+ 
+        x_cat_conv_relu = self.relu(self.bn(self.conv_1x1(torch.cat((x_h, x_w), 3))))
+ 
+        x_cat_conv_split_h, x_cat_conv_split_w = x_cat_conv_relu.split([h, w], 3)
+ 
+        s_h = self.sigmoid_h(self.F_h(x_cat_conv_split_h.permute(0, 1, 3, 2)))
+        s_w = self.sigmoid_w(self.F_w(x_cat_conv_split_w))
+ 
+        out = x * s_h.expand_as(x) * s_w.expand_as(x)
+        return out
+    
+class asf_attention_model(nn.Module):
+    # Concatenate a list of tensors along dimension
+    def __init__(self, ch=256):
+        super().__init__()
+        self.channel_att = asf_channel_att(ch)
+        self.local_att = asf_local_att(ch)
+    def forward(self, x):
+        input1,input2 = x[0], x[1]
+        input1 = self.channel_att(input1)
+        x = input1 + input2
+        x = self.local_att(x)
+        return x
+
+######################################## Attentional Scale Sequence Fusion end ########################################
+######################################## DySample start ########################################
+
+class DySample(nn.Module):
+    def __init__(self, in_channels, scale=2, style='lp', groups=4, dyscope=False):
+        super().__init__()
+        self.scale = scale
+        self.style = style
+        self.groups = groups
+        assert style in ['lp', 'pl']
+        if style == 'pl':
+            assert in_channels >= scale ** 2 and in_channels % scale ** 2 == 0
+        assert in_channels >= groups and in_channels % groups == 0
+
+        if style == 'pl':
+            in_channels = in_channels // scale ** 2
+            out_channels = 2 * groups
+        else:
+            out_channels = 2 * groups * scale ** 2
+
+        self.offset = nn.Conv2d(in_channels, out_channels, 1)
+        self.normal_init(self.offset, std=0.001)
+        if dyscope:
+            self.scope = nn.Conv2d(in_channels, out_channels, 1)
+            self.constant_init(self.scope, val=0.)
+
+        self.register_buffer('init_pos', self._init_pos())
+
+    def normal_init(self, module, mean=0, std=1, bias=0):
+        if hasattr(module, 'weight') and module.weight is not None:
+            nn.init.normal_(module.weight, mean, std)
+        if hasattr(module, 'bias') and module.bias is not None:
+            nn.init.constant_(module.bias, bias)
+
+    def constant_init(self, module, val, bias=0):
+        if hasattr(module, 'weight') and module.weight is not None:
+            nn.init.constant_(module.weight, val)
+        if hasattr(module, 'bias') and module.bias is not None:
+            nn.init.constant_(module.bias, bias)
+
+    def _init_pos(self):
+        h = torch.arange((-self.scale + 1) / 2, (self.scale - 1) / 2 + 1) / self.scale
+        return torch.stack(torch.meshgrid([h, h])).transpose(1, 2).repeat(1, self.groups, 1).reshape(1, -1, 1, 1)
+
+    def sample(self, x, offset):
+        B, _, H, W = offset.shape
+        offset = offset.view(B, 2, -1, H, W)
+        coords_h = torch.arange(H) + 0.5
+        coords_w = torch.arange(W) + 0.5
+        coords = torch.stack(torch.meshgrid([coords_w, coords_h])
+                             ).transpose(1, 2).unsqueeze(1).unsqueeze(0).type(x.dtype).to(x.device)
+        normalizer = torch.tensor([W, H], dtype=x.dtype, device=x.device).view(1, 2, 1, 1, 1)
+        coords = 2 * (coords + offset) / normalizer - 1
+        coords = F.pixel_shuffle(coords.view(B, -1, H, W), self.scale).view(
+            B, 2, -1, self.scale * H, self.scale * W).permute(0, 2, 3, 4, 1).contiguous().flatten(0, 1)
+        return F.grid_sample(x.reshape(B * self.groups, -1, H, W), coords, mode='bilinear',
+                             align_corners=False, padding_mode="border").reshape((B, -1, self.scale * H, self.scale * W))
+
+    def forward_lp(self, x):
+        if hasattr(self, 'scope'):
+            offset = self.offset(x) * self.scope(x).sigmoid() * 0.5 + self.init_pos
+        else:
+            offset = self.offset(x) * 0.25 + self.init_pos
+        return self.sample(x, offset)
+
+    def forward_pl(self, x):
+        x_ = F.pixel_shuffle(x, self.scale)
+        if hasattr(self, 'scope'):
+            offset = F.pixel_unshuffle(self.offset(x_) * self.scope(x_).sigmoid(), self.scale) * 0.5 + self.init_pos
+        else:
+            offset = F.pixel_unshuffle(self.offset(x_), self.scale) * 0.25 + self.init_pos
+        return self.sample(x, offset)
+
+    def forward(self, x):
+        if self.style == 'pl':
+            return self.forward_pl(x)
+        return self.forward_lp(x)
+
+######################################## DySample end ########################################
+######################################## Hyper-YOLO start ########################################
+
+class MANet(nn.Module):
+
+    def __init__(self, c1, c2, n=1, shortcut=False, p=1, kernel_size=3, g=1, e=0.5):
+        super().__init__()
+        self.c = int(c2 * e)
+        self.cv_first = Conv(c1, 2 * self.c, 1, 1)
+        self.cv_final = Conv((4 + n) * self.c, c2, 1)
+        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        self.cv_block_1 = Conv(2 * self.c, self.c, 1, 1)
+        dim_hid = int(p * 2 * self.c)
+        self.cv_block_2 = nn.Sequential(Conv(2 * self.c, dim_hid, 1, 1), DWConv(dim_hid, dim_hid, kernel_size, 1),
+                                      Conv(dim_hid, self.c, 1, 1))
+
+    def forward(self, x):
+        y = self.cv_first(x)
+        y0 = self.cv_block_1(y)
+        y1 = self.cv_block_2(y)
+        y2, y3 = y.chunk(2, 1)
+        y = list((y0, y1, y2, y3))
+        y.extend(m(y[-1]) for m in self.m)
+
+        return self.cv_final(torch.cat(y, 1))
+
+class MANet_FasterBlock(MANet):
+    def __init__(self, c1, c2, n=1, shortcut=False, p=1, kernel_size=3, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, p, kernel_size, g, e)
+        self.m = nn.ModuleList(Faster_Block(self.c, self.c) for _ in range(n))
+
+class MANet_FasterCGLU(MANet):
+    def __init__(self, c1, c2, n=1, shortcut=False, p=1, kernel_size=3, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, p, kernel_size, g, e)
+        self.m = nn.ModuleList(Faster_Block_CGLU(self.c, self.c) for _ in range(n))
+
+class MANet_Star(MANet):
+    def __init__(self, c1, c2, n=1, shortcut=False, p=1, kernel_size=3, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, p, kernel_size, g, e)
+        self.m = nn.ModuleList(Star_Block(self.c) for _ in range(n))
+
+class MessageAgg(nn.Module):
+    def __init__(self, agg_method="mean"):
+        super().__init__()
+        self.agg_method = agg_method
+
+    def forward(self, X, path):
+        """
+            X: [n_node, dim]
+            path: col(source) -> row(target)
+        """
+        X = torch.matmul(path, X)
+        if self.agg_method == "mean":
+            norm_out = 1 / torch.sum(path, dim=2, keepdim=True)
+            norm_out[torch.isinf(norm_out)] = 0
+            X = norm_out * X
+            return X
+        elif self.agg_method == "sum":
+            pass
+        return X
+
+class HyPConv(nn.Module):
+    def __init__(self, c1, c2):
+        super().__init__()
+        self.fc = nn.Linear(c1, c2)
+        self.v2e = MessageAgg(agg_method="mean")
+        self.e2v = MessageAgg(agg_method="mean")
+
+    def forward(self, x, H):
+        x = self.fc(x)
+        # v -> e
+        E = self.v2e(x, H.transpose(1, 2).contiguous())
+        # e -> v
+        x = self.e2v(E, H)
+
+        return x
+
+class HyperComputeModule(nn.Module):
+    def __init__(self, c1, c2, threshold):
+        super().__init__()
+        self.threshold = threshold
+        self.hgconv = HyPConv(c1, c2)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        b, c, h, w = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+        x = x.view(b, c, -1).transpose(1, 2).contiguous()
+        feature = x.clone()
+        distance = torch.cdist(feature, feature)
+        hg = distance < self.threshold
+        hg = hg.float().to(x.device).to(x.dtype)
+        x = self.hgconv(x, hg).to(x.device).to(x.dtype) + x
+        x = x.transpose(1, 2).contiguous().view(b, c, h, w)
+        x = self.act(self.bn(x))
+
+        return x
+
+######################################## Hyper-YOLO end ########################################
+######################################## WaveletPool start ########################################
+
+class WaveletPool(nn.Module):
+    def __init__(self):
+        super(WaveletPool, self).__init__()
+        ll = np.array([[0.5, 0.5], [0.5, 0.5]])
+        lh = np.array([[-0.5, -0.5], [0.5, 0.5]])
+        hl = np.array([[-0.5, 0.5], [-0.5, 0.5]])
+        hh = np.array([[0.5, -0.5], [-0.5, 0.5]])
+        filts = np.stack([ll[None,::-1,::-1], lh[None,::-1,::-1],
+                            hl[None,::-1,::-1], hh[None,::-1,::-1]],
+                            axis=0)
+        self.weight = nn.Parameter(
+            torch.tensor(filts).to(torch.get_default_dtype()),
+            requires_grad=False)
+    def forward(self, x):
+        C = x.shape[1]
+        filters = torch.cat([self.weight,] * C, dim=0)
+        y = F.conv2d(x, filters, groups=C, stride=2)
+        return y
+
+
+class WaveletUnPool(nn.Module):
+    def __init__(self):
+        super(WaveletUnPool, self).__init__()
+        ll = np.array([[0.5, 0.5], [0.5, 0.5]])
+        lh = np.array([[-0.5, -0.5], [0.5, 0.5]])
+        hl = np.array([[-0.5, 0.5], [-0.5, 0.5]])
+        hh = np.array([[0.5, -0.5], [-0.5, 0.5]])
+        filts = np.stack([ll[None, ::-1, ::-1], lh[None, ::-1, ::-1],
+                            hl[None, ::-1, ::-1], hh[None, ::-1, ::-1]],
+                            axis=0)
+        self.weight = nn.Parameter(
+            torch.tensor(filts).to(torch.get_default_dtype()),
+            requires_grad=False)
+
+    def forward(self, x):
+        C = torch.floor_divide(x.shape[1], 4)
+        filters = torch.cat([self.weight, ] * C, dim=0)
+        y = F.conv_transpose2d(x, filters, groups=C, stride=2)
+        return y
+
+######################################## WaveletPool end ########################################
+######################################## Efficient Multi-Branch&Scale FPN start ########################################
+
+#   Efficient up-convolution block (EUCB)
+class EUCB(nn.Module):
+    def __init__(self, in_channels, kernel_size=3, stride=1):
+        super(EUCB,self).__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.up_dwc = nn.Sequential(
+            nn.Upsample(scale_factor=2),
+            Conv(self.in_channels, self.in_channels, kernel_size, g=self.in_channels, s=stride)
+        )
+        self.pwc = nn.Sequential(
+            nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1, stride=1, padding=0, bias=True)
+        )
+
+    def forward(self, x):
+        x = self.up_dwc(x)
+        x = self.channel_shuffle(x, self.in_channels)
+        x = self.pwc(x)
+        return x
+    
+    def channel_shuffle(self, x, groups):
+        batchsize, num_channels, height, width = x.data.size()
+        channels_per_group = num_channels // groups
+        x = x.view(batchsize, groups, channels_per_group, height, width)
+        x = torch.transpose(x, 1, 2).contiguous()
+        x = x.view(batchsize, -1, height, width)
+        return x
+
+#   Multi-scale depth-wise convolution (MSDC)
+class MSDC(nn.Module):
+    def __init__(self, in_channels, kernel_sizes, stride, dw_parallel=True):
+        super(MSDC, self).__init__()
+
+        self.in_channels = in_channels
+        self.kernel_sizes = kernel_sizes
+        self.dw_parallel = dw_parallel
+
+        self.dwconvs = nn.ModuleList([
+            nn.Sequential(
+                Conv(self.in_channels, self.in_channels, kernel_size, s=stride, g=self.in_channels)
+            )
+            for kernel_size in self.kernel_sizes
+        ])
+
+    def forward(self, x):
+        # Apply the convolution layers in a loop
+        outputs = []
+        for dwconv in self.dwconvs:
+            dw_out = dwconv(x)
+            outputs.append(dw_out)
+            if self.dw_parallel == False:
+                x = x+dw_out
+        # You can return outputs based on what you intend to do with them
+        return outputs
+
+class MSCB(nn.Module):
+    """
+    Multi-scale convolution block (MSCB) 
+    """
+    def __init__(self, in_channels, out_channels, kernel_sizes=[1,3,5], stride=1, expansion_factor=2, dw_parallel=True, add=True):
+        super(MSCB, self).__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.stride = stride
+        self.kernel_sizes = kernel_sizes
+        self.expansion_factor = expansion_factor
+        self.dw_parallel = dw_parallel
+        self.add = add
+        self.n_scales = len(self.kernel_sizes)
+        # check stride value
+        assert self.stride in [1, 2]
+        # Skip connection if stride is 1
+        self.use_skip_connection = True if self.stride == 1 else False
+
+        # expansion factor
+        self.ex_channels = int(self.in_channels * self.expansion_factor)
+        self.pconv1 = nn.Sequential(
+            # pointwise convolution
+            Conv(self.in_channels, self.ex_channels, 1)
+        )
+        self.msdc = MSDC(self.ex_channels, self.kernel_sizes, self.stride, dw_parallel=self.dw_parallel)
+        if self.add == True:
+            self.combined_channels = self.ex_channels*1
+        else:
+            self.combined_channels = self.ex_channels*self.n_scales
+        self.pconv2 = nn.Sequential(
+            # pointwise convolution
+            Conv(self.combined_channels, self.out_channels, 1, act=False)
+        )
+        if self.use_skip_connection and (self.in_channels != self.out_channels):
+            self.conv1x1 = nn.Conv2d(self.in_channels, self.out_channels, 1, 1, 0, bias=False)
+
+    def forward(self, x):
+        pout1 = self.pconv1(x)
+        msdc_outs = self.msdc(pout1)
+        if self.add == True:
+            dout = 0
+            for dwout in msdc_outs:
+                dout = dout + dwout
+        else:
+            dout = torch.cat(msdc_outs, dim=1)
+        dout = self.channel_shuffle(dout, math.gcd(self.combined_channels,self.out_channels))
+        out = self.pconv2(dout)
+        if self.use_skip_connection:
+            if self.in_channels != self.out_channels:
+                x = self.conv1x1(x)
+            return x + out
+        else:
+            return out
+    
+    def channel_shuffle(self, x, groups):
+        batchsize, num_channels, height, width = x.data.size()
+        channels_per_group = num_channels // groups
+        x = x.view(batchsize, groups, channels_per_group, height, width)
+        x = torch.transpose(x, 1, 2).contiguous()
+        x = x.view(batchsize, -1, height, width)
+        return x
+
+class CSP_MSCB(C2f):
+    def __init__(self, c1, c2, n=1, kernel_sizes=[1,3,5], shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        
+        self.m = nn.ModuleList(MSCB(self.c, self.c, kernel_sizes=kernel_sizes) for _ in range(n))
+
+######################################## Multi-Branch&Scale-FPN end ########################################

@@ -447,7 +447,7 @@ class v8DetectionLoss:
                                               target_scores_sum, fg_mask, ((imgsz[0] ** 2 + imgsz[1] ** 2) / torch.square(stride_tensor)).repeat(1, batch_size).transpose(1, 0))
 
             # # 更新总损失，将平均损失加到原有损失上
-            # loss[0] = 0.6* new_loss + 0.4* loss[0]
+            loss[0] = 0.7* new_loss + 0.3* loss[0]
 
 
         loss[0] *= self.hyp.box  # box gain

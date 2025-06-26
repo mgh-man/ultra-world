@@ -4,8 +4,10 @@ path: /mnt/datasets/manfenglin/
 # val: ./ISDD/images/val
 # test: ./ISDD/images/test
 train: ./ISDD/images/train
-val: ./isdd+sii/images/test
-test: ./isdd+sii/images/test
+val: ./ISDD/images/test
+test: ./ISDD/images/test
+# val: ./isdd+sii/images/test
+# test: ./isdd+sii/images/test
 # number of classes
 
 

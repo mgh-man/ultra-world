@@ -58,6 +58,19 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    C2f_AP,
+    WFU,
+    CSP_MutilScaleEdgeInformationSelect,
+    C2f_RAB,
+    Zoom_cat,
+    ScalSeq,
+    DynamicScalSeq,
+    Add,asf_attention_model,
+    DySample,
+    MANet,
+    WaveletUnPool,
+    WaveletPool,
+    EUCB,
 )
 from .conv import (
     CBAM,
@@ -74,6 +87,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    PSConv,
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (

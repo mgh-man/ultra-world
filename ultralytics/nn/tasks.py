@@ -52,6 +52,7 @@ from ultralytics.nn.modules import (
     ImagePoolingAttn,
     Index,
     Pose,
+    PSConv,
     RepC3,
     RepConv,
     RepNCSPELAN4,
@@ -63,6 +64,19 @@ from ultralytics.nn.modules import (
     TorchVision,
     WorldDetect,
     v10Detect,
+    C2f_AP,
+    WFU,
+    CSP_MutilScaleEdgeInformationSelect,
+    C2f_RAB,
+    Zoom_cat,
+    ScalSeq,
+    DynamicScalSeq,
+    Add,asf_attention_model,
+    DySample,
+    MANet,
+    WaveletUnPool,
+    WaveletPool,
+    EUCB,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -987,6 +1001,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB,
             A2C2f,
+            PSConv,
+            C2f_AP,
+            CSP_MutilScaleEdgeInformationSelect,
+            C2f_RAB,
+            MANet,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1006,6 +1025,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             C2PSA,
             A2C2f,
+            C2f_AP,
+            CSP_MutilScaleEdgeInformationSelect,
+            C2f_RAB,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1073,6 +1095,27 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        elif m in {WFU}:
+            c1 = [ch[x] for x in f]
+            c2 = c1[0]
+            args = [c1]
+        elif m is Zoom_cat:
+            c2 = sum(ch[x] for x in f)
+        elif m is Add:
+            c2 = ch[f[-1]]
+        elif m in {ScalSeq, DynamicScalSeq}:
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(args[0] * width, 8)
+            args = [c1, c2]
+        elif m is asf_attention_model:
+            args = [ch[f[-1]]]
+        elif m is {DySample, EUCB}:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m in {WaveletUnPool}:
+            c2 = ch[f] // 4
+        elif m in {WaveletPool}:
+            c2 = ch[f] * 4
         else:
             c2 = ch[f]
 
