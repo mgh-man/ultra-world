@@ -1,15 +1,22 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Block modules."""
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
-
+from .DarkIR import EBlock, DBlock
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
-
+from torch import Tensor
+from typing import Optional, Callable, Union, List
+from .DCMPNet import LEGM
+from .lsnet import SKA, LSConv, Block as LSBlock
+from functools import partial
+from .metaformer import *
+from .hcfnet import PPA, LocalGlobalAttention
+from einops import rearrange, reduce
 __all__ = (
     "DFL",
     "HGBlock",
@@ -64,6 +71,17 @@ __all__ = (
     "WaveletUnPool",
     "WaveletPool",
     "EUCB",
+    "SDI",
+    'C2f_EBlock', 'C2f_DBlock',
+    'LoGStem',
+    'C2f_LFEM',
+    'C2f_LEGM',
+    'C2f_LSBlock',
+    'HAFB',
+    'C2f_DCMB',
+    'C2f_Strip',
+    'ContrastDrivenFeatureAggregation',
+    'C2f_HFERB',
 )
 
 
@@ -85,7 +103,7 @@ class DFL(nn.Module):
     def forward(self, x):
         """Applies a transformer layer on input tensor 'x' and returns a tensor."""
         b, _, a = x.shape  # batch, channels, anchors
-        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).softmax(1)).view(b, 4, a)
+        return self.conv(x.view(b, 4, self.c1, a).transpose(2, 1).contiguous().softmax(1)).view(b, 4, a)
         # return self.conv(x.view(b, self.c1, 4, a).softmax(1)).view(b, 4, a)
 
 
@@ -512,7 +530,7 @@ class ImagePoolingAttn(nn.Module):
         assert len(x) == self.nf
         num_patches = self.k**2
         x = [pool(proj(x)).view(bs, -1, num_patches) for (x, proj, pool) in zip(x, self.projections, self.im_pools)]
-        x = torch.cat(x, dim=-1).transpose(1, 2)
+        x = torch.cat(x, dim=-1).transpose(1, 2).contiguous()
         q = self.query(text)
         k = self.key(x)
         v = self.value(x)
@@ -1221,20 +1239,20 @@ class AAttn(nn.Module):
         B, C, H, W = x.shape
         N = H * W
 
-        qkv = self.qkv(x).flatten(2).transpose(1, 2)
+        qkv = self.qkv(x).flatten(2).transpose(1, 2).contiguous()
         if self.area > 1:
             qkv = qkv.reshape(B * self.area, N // self.area, C * 3)
             B, N, _ = qkv.shape
         q, k, v = (
             qkv.view(B, N, self.num_heads, self.head_dim * 3)
-            .permute(0, 2, 3, 1)
+            .permute(0, 2, 3, 1).contiguous()
             .split([self.head_dim, self.head_dim, self.head_dim], dim=2)
         )
-        attn = (q.transpose(-2, -1) @ k) * (self.head_dim**-0.5)
+        attn = (q.transpose(-2, -1).contiguous() @ k) * (self.head_dim**-0.5)
         attn = attn.softmax(dim=-1)
-        x = v @ attn.transpose(-2, -1)
-        x = x.permute(0, 3, 1, 2)
-        v = v.permute(0, 3, 1, 2)
+        x = v @ attn.transpose(-2, -1).contiguous()
+        x = x.permute(0, 3, 1, 2).contiguous()
+        v = v.permute(0, 3, 1, 2).contiguous()
 
         if self.area > 1:
             x = x.reshape(B // self.area, N * self.area, C)
@@ -1424,12 +1442,12 @@ class HaarWavelet(nn.Module):
         if not rev:
             out = F.conv2d(x, self.haar_weights, bias=None, stride=2, groups=self.in_channels) / 4.0
             out = out.reshape([x.shape[0], self.in_channels, 4, x.shape[2] // 2, x.shape[3] // 2])
-            out = torch.transpose(out, 1, 2)
+            out = torch.transpose(out, 1, 2).contiguous()
             out = out.reshape([x.shape[0], self.in_channels * 4, x.shape[2] // 2, x.shape[3] // 2])
             return out
         else:
             out = x.reshape([x.shape[0], 4, self.in_channels, x.shape[2], x.shape[3]])
-            out = torch.transpose(out, 1, 2)
+            out = torch.transpose(out, 1, 2).contiguous()
             out = out.reshape([x.shape[0], self.in_channels * 4, x.shape[2], x.shape[3]])
             return F.conv_transpose2d(out, self.haar_weights, bias=None, stride=2, groups = self.in_channels)
 
@@ -1846,8 +1864,8 @@ class asf_channel_att(nn.Module):
     def forward(self, x):
         y = self.avg_pool(x)
         y = y.squeeze(-1)
-        y = y.transpose(-1, -2)
-        y = self.conv(y).transpose(-1, -2).unsqueeze(-1)
+        y = y.transpose(-1, -2).contiguous()
+        y = self.conv(y).transpose(-1, -2).contiguous().unsqueeze(-1)
         y = self.sigmoid(y)
         return x * y.expand_as(x)
     
@@ -1869,14 +1887,14 @@ class asf_local_att(nn.Module):
     def forward(self, x):
         _, _, h, w = x.size()
         
-        x_h = torch.mean(x, dim = 3, keepdim = True).permute(0, 1, 3, 2)
+        x_h = torch.mean(x, dim = 3, keepdim = True).permute(0, 1, 3, 2).contiguous()
         x_w = torch.mean(x, dim = 2, keepdim = True)
  
         x_cat_conv_relu = self.relu(self.bn(self.conv_1x1(torch.cat((x_h, x_w), 3))))
  
         x_cat_conv_split_h, x_cat_conv_split_w = x_cat_conv_relu.split([h, w], 3)
  
-        s_h = self.sigmoid_h(self.F_h(x_cat_conv_split_h.permute(0, 1, 3, 2)))
+        s_h = self.sigmoid_h(self.F_h(x_cat_conv_split_h.permute(0, 1, 3, 2))).contiguous()
         s_w = self.sigmoid_w(self.F_w(x_cat_conv_split_w))
  
         out = x * s_h.expand_as(x) * s_w.expand_as(x)
@@ -1937,7 +1955,7 @@ class DySample(nn.Module):
 
     def _init_pos(self):
         h = torch.arange((-self.scale + 1) / 2, (self.scale - 1) / 2 + 1) / self.scale
-        return torch.stack(torch.meshgrid([h, h])).transpose(1, 2).repeat(1, self.groups, 1).reshape(1, -1, 1, 1)
+        return torch.stack(torch.meshgrid([h, h])).transpose(1, 2).contiguous().repeat(1, self.groups, 1).reshape(1, -1, 1, 1)
 
     def sample(self, x, offset):
         B, _, H, W = offset.shape
@@ -1945,7 +1963,7 @@ class DySample(nn.Module):
         coords_h = torch.arange(H) + 0.5
         coords_w = torch.arange(W) + 0.5
         coords = torch.stack(torch.meshgrid([coords_w, coords_h])
-                             ).transpose(1, 2).unsqueeze(1).unsqueeze(0).type(x.dtype).to(x.device)
+                             ).transpose(1, 2).contiguous().unsqueeze(1).unsqueeze(0).type(x.dtype).to(x.device)
         normalizer = torch.tensor([W, H], dtype=x.dtype, device=x.device).view(1, 2, 1, 1, 1)
         coords = 2 * (coords + offset) / normalizer - 1
         coords = F.pixel_shuffle(coords.view(B, -1, H, W), self.scale).view(
@@ -2244,3 +2262,1018 @@ class CSP_MSCB(C2f):
         self.m = nn.ModuleList(MSCB(self.c, self.c, kernel_sizes=kernel_sizes) for _ in range(n))
 
 ######################################## Multi-Branch&Scale-FPN end ########################################
+######################################## Semantics and Detail Infusion start ########################################
+
+class SDI(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+
+        # self.convs = nn.ModuleList([nn.Conv2d(channel, channels[0], kernel_size=3, stride=1, padding=1) for channel in channels])
+        self.convs = nn.ModuleList([GSConv(channel, channels[0]) for channel in channels])
+
+    def forward(self, xs):
+        ans = torch.ones_like(xs[0])
+        target_size = xs[0].shape[2:]
+        for i, x in enumerate(xs):
+            if x.shape[-1] > target_size[-1]:
+                x = F.adaptive_avg_pool2d(x, (target_size[0], target_size[1]))
+            elif x.shape[-1] < target_size[-1]:
+                x = F.interpolate(x, size=(target_size[0], target_size[1]),
+                                      mode='bilinear', align_corners=True)
+            ans = ans * self.convs[i](x)
+        return ans
+
+######################################## Semantics and Detail Infusion end ##################################
+######################################## SlimNeck begin ########################################
+
+class GSConv(nn.Module):
+    # GSConv https://github.com/AlanLi1997/slim-neck-by-gsconv
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        super().__init__()
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, k, s, p, g, d, Conv.default_act)
+        self.cv2 = Conv(c_, c_, 5, 1, p, c_, d, Conv.default_act)
+
+    def forward(self, x):
+        x1 = self.cv1(x)
+        x2 = torch.cat((x1, self.cv2(x1)), 1)
+        # shuffle
+        # y = x2.reshape(x2.shape[0], 2, x2.shape[1] // 2, x2.shape[2], x2.shape[3])
+        # y = y.permute(0, 2, 1, 3, 4)
+        # return y.reshape(y.shape[0], -1, y.shape[3], y.shape[4])
+
+        b, n, h, w = x2.size()
+        b_n = b * n // 2
+        y = x2.reshape(b_n, 2, h * w)
+        y = y.permute(1, 0, 2).contiguous()
+        y = y.reshape(2, -1, n // 2, h, w)
+
+        return torch.cat((y[0], y[1]), 1)
+
+class GSConvns(GSConv):
+    # GSConv with a normative-shuffle https://github.com/AlanLi1997/slim-neck-by-gsconv
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+        super().__init__(c1, c2, k, s, p, g, act=True)
+        c_ = c2 // 2
+        self.shuf = nn.Conv2d(c_ * 2, c2, 1, 1, 0, bias=False)
+
+    def forward(self, x):
+        x1 = self.cv1(x)
+        x2 = torch.cat((x1, self.cv2(x1)), 1)
+        # normative-shuffle, TRT supported
+        return nn.ReLU()(self.shuf(x2))
+
+class GSBottleneck(nn.Module):
+    # GS Bottleneck https://github.com/AlanLi1997/slim-neck-by-gsconv
+    def __init__(self, c1, c2, k=3, s=1, e=0.5):
+        super().__init__()
+        c_ = int(c2*e)
+        # for lighting
+        self.conv_lighting = nn.Sequential(
+            GSConv(c1, c_, 1, 1),
+            GSConv(c_, c2, 3, 1, act=False))
+        self.shortcut = Conv(c1, c2, 1, 1, act=False)
+
+    def forward(self, x):
+        return self.conv_lighting(x) + self.shortcut(x)
+
+class GSBottleneckns(GSBottleneck):
+    # GS Bottleneck https://github.com/AlanLi1997/slim-neck-by-gsconv
+    def __init__(self, c1, c2, k=3, s=1, e=0.5):
+        super().__init__(c1, c2, k, s, e)
+        c_ = int(c2*e)
+        # for lighting
+        self.conv_lighting = nn.Sequential(
+            GSConvns(c1, c_, 1, 1),
+            GSConvns(c_, c2, 3, 1, act=False))
+        
+class GSBottleneckC(GSBottleneck):
+    # cheap GS Bottleneck https://github.com/AlanLi1997/slim-neck-by-gsconv
+    def __init__(self, c1, c2, k=3, s=1):
+        super().__init__(c1, c2, k, s)
+        self.shortcut = DWConv(c1, c2, k, s, act=False)
+
+class VoVGSCSP(nn.Module):
+    # VoVGSCSP module with GSBottleneck
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.gsb = nn.Sequential(*(GSBottleneck(c_, c_, e=1.0) for _ in range(n)))
+        self.res = Conv(c_, c_, 3, 1, act=False)
+        self.cv3 = Conv(2 * c_, c2, 1)
+
+    def forward(self, x):
+        x1 = self.gsb(self.cv1(x))
+        y = self.cv2(x)
+        return self.cv3(torch.cat((y, x1), dim=1))
+
+class VoVGSCSPns(VoVGSCSP):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.gsb = nn.Sequential(*(GSBottleneckns(c_, c_, e=1.0) for _ in range(n)))
+
+class VoVGSCSPC(VoVGSCSP):
+    # cheap VoVGSCSP module with GSBottleneck
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__(c1, c2)
+        c_ = int(c2 * 0.5)  # hidden channels
+        self.gsb = GSBottleneckC(c_, c_, 1, 1)
+        
+######################################## SlimNeck end ########################################
+######################################## CVPR2025 DarkIR start ########################################
+        
+class C2f_EBlock(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(EBlock(self.c) for _ in range(n))
+
+class C2f_DBlock(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(DBlock(self.c) for _ in range(n))
+
+######################################## CVPR2025 DarkIR end ########################################
+
+####################################### LEGNet start ########################################
+
+class Conv_Extra(nn.Module):
+    def __init__(self, channel):
+        super(Conv_Extra, self).__init__()
+        self.block = nn.Sequential(Conv(channel, 64, 1),
+                                   Conv(64, 64, 3),
+                                   Conv(64, channel, 1, act=False))
+    def forward(self, x):
+        out = self.block(x)
+        return out
+
+class Scharr(nn.Module):
+    def __init__(self, channel):
+        super(Scharr, self).__init__()
+        # 定义Scharr滤波器
+        scharr_x = torch.tensor([[-3., 0., 3.], [-10., 0., 10.], [-3., 0., 3.]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        scharr_y = torch.tensor([[-3., -10., -3.], [0., 0., 0.], [3., 10., 3.]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        self.conv_x = nn.Conv2d(channel, channel, kernel_size=3, padding=1, groups=channel, bias=False)
+        self.conv_y = nn.Conv2d(channel, channel, kernel_size=3, padding=1, groups=channel, bias=False)
+        # 将Sobel滤波器分配给卷积层
+        self.conv_x.weight.data = scharr_x.repeat(channel, 1, 1, 1)
+        self.conv_y.weight.data = scharr_y.repeat(channel, 1, 1, 1)
+        self.norm = nn.BatchNorm2d(channel)
+        self.conv_extra = Conv_Extra(channel)
+
+    def forward(self, x):
+        # show_feature(x)
+        # 应用卷积操作
+        edges_x = self.conv_x(x)
+        edges_y = self.conv_y(x)
+        # 计算边缘和高斯分布强度（可以选择不同的方式进行融合，这里使用平方和开根号）
+        scharr_edge = torch.sqrt(edges_x ** 2 + edges_y ** 2)
+        scharr_edge = self.act(self.norm(scharr_edge))
+        out = self.conv_extra(x + scharr_edge)
+        # show_feature(out)
+
+        return out
+
+class Gaussian(nn.Module):
+    def __init__(self, dim, size, sigma, feature_extra=True):
+        super().__init__()
+        self.feature_extra = feature_extra
+        gaussian = self.gaussian_kernel(size, sigma)
+        gaussian = nn.Parameter(data=gaussian, requires_grad=False).clone()
+        self.gaussian = nn.Conv2d(dim, dim, kernel_size=size, stride=1, padding=int(size // 2), groups=dim, bias=False)
+        self.gaussian.weight.data = gaussian.repeat(dim, 1, 1, 1)
+        self.norm = nn.BatchNorm2d(dim)
+        self.act = nn.SiLU()
+        if feature_extra == True:
+            self.conv_extra = Conv_Extra(dim)
+
+    def forward(self, x):
+        edges_o = self.gaussian(x)
+        gaussian = self.act(self.norm(edges_o))
+        if self.feature_extra == True:
+            out = self.conv_extra(x + gaussian)
+        else:
+            out = gaussian
+        return out
+    
+    def gaussian_kernel(self, size: int, sigma: float):
+        kernel = torch.FloatTensor([
+            [(1 / (2 * math.pi * sigma ** 2)) * math.exp(-(x ** 2 + y ** 2) / (2 * sigma ** 2))
+             for x in range(-size // 2 + 1, size // 2 + 1)]
+             for y in range(-size // 2 + 1, size // 2 + 1)
+             ]).unsqueeze(0).unsqueeze(0)
+        return kernel / kernel.sum()
+
+class LFEA(nn.Module):
+    def __init__(self, channel):
+        super(LFEA, self).__init__()
+        self.channel = channel
+        t = int(abs((math.log(channel, 2) + 1) / 2))
+        k = t if t % 2 else t + 1
+        self.conv2d = self.block = Conv(channel, channel, 3)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv1d = nn.Conv1d(1, 1, kernel_size=k, padding=(k - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+        self.norm = nn.BatchNorm2d(channel)
+
+    def forward(self, c, att):
+        att = c * att + c
+        att = self.conv2d(att)
+        wei = self.avg_pool(att)
+        wei = self.conv1d(wei.squeeze(-1).transpose(-1, -2)).transpose(-1, -2).unsqueeze(-1)
+        wei = self.sigmoid(wei)
+        x = self.norm(c + att * wei)
+
+        return x
+
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+    """
+    
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
+    
+    def forward(self, x):
+        return drop_path(x, self.drop_prob, self.training)
+
+def drop_path(x, drop_prob: float = 0., training: bool = False):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    This is the same as the DropConnect impl I created for EfficientNet, etc networks, however,
+    the original name is misleading as 'Drop Connect' is a different form of dropout in a separate paper...
+    See discussion: https://github.com/tensorflow/tpu/issues/494#issuecomment-532968956 ... I've opted for
+    changing the layer and argument names to 'drop path' rather than mix DropConnect as a layer name and use
+    'survival rate' as the argument.
+    """
+    if drop_prob == 0. or not training:
+        return x
+    keep_prob = 1 - drop_prob
+    shape = (x.shape[0],) + (1,) * (x.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
+    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+    random_tensor.floor_()  # binarize
+    output = x.div(keep_prob) * random_tensor
+    return output
+
+class LFE_Module(nn.Module):
+    def __init__(self,
+                 dim,
+                 stage=1,
+                 mlp_ratio=2,
+                 drop_path=0.1,
+                 ):
+        super().__init__()
+        self.stage = stage
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        mlp_layer: List[nn.Module] = [
+            Conv(dim, mlp_hidden_dim, 1),
+            nn.Conv2d(mlp_hidden_dim, dim, 1, bias=False)]
+
+        self.mlp = nn.Sequential(*mlp_layer)
+        self.LFEA = LFEA(dim)
+
+        if stage == 0:
+            self.Scharr_edge = Scharr(dim)
+        else:
+            self.gaussian = Gaussian(dim, 5, 1.0)
+        self.norm = nn.BatchNorm2d(dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        # show_feature(x)
+        if self.stage == 0:
+            att = self.Scharr_edge(x)
+        else:
+            att = self.gaussian(x)
+        x_att = self.LFEA(x, att)
+        x = x + self.norm(self.drop_path(self.mlp(x_att)))
+        return x
+
+class C2f_LFEM(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(LFE_Module(self.c) for _ in range(n))
+
+class DRFD_LoG(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+        self.outdim = dim * 2
+        self.conv = nn.Conv2d(dim, dim * 2, kernel_size=3, stride=1, padding=1, groups=dim)
+        self.conv_c = nn.Conv2d(dim * 2, dim * 2, kernel_size=3, stride=2, padding=1, groups=dim * 2)
+        self.act_c = nn.SiLU()
+        self.norm_c = nn.BatchNorm2d(dim * 2)
+        self.max_m = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        self.norm_m = nn.BatchNorm2d(dim * 2)
+        self.fusion = nn.Conv2d(dim * 4, self.outdim, kernel_size=1, stride=1)
+        # gaussian
+        self.gaussian = Gaussian(self.outdim, 5, 0.5, feature_extra=False)
+        self.norm_g = nn.BatchNorm2d(self.outdim)
+
+    def forward(self, x):  # x = [B, C, H, W]
+
+        x = self.conv(x)  # x = [B, 2C, H, W]
+        gaussian = self.gaussian(x)
+        x = self.norm_g(x + gaussian)
+        max = self.norm_m(self.max_m(x))  # m = [B, 2C, H/2, W/2]
+        conv = self.norm_c(self.act_c(self.conv_c(x)))  # c = [B, 2C, H/2, W/2]
+        x = torch.cat([conv, max], dim=1)  # x = [B, 2C+2C, H/2, W/2]  -->  [B, 4C, H/2, W/2]
+        x = self.fusion(x)  # x = [B, 4C, H/2, W/2]     -->  [B, 2C, H/2, W/2]
+
+        return x
+
+class LoGFilter(nn.Module):
+    def __init__(self, in_c, out_c, kernel_size, sigma):
+        super(LoGFilter, self).__init__()
+        # 7x7 convolution with stride 1 for feature reinforcement, Channels from 3 to 1/4C.
+        self.conv_init = nn.Conv2d(in_c, out_c, kernel_size=7, stride=1, padding=3)
+        """创建高斯-拉普拉斯核"""
+        # 初始化二维坐标
+        ax = torch.arange(-(kernel_size // 2), (kernel_size // 2) + 1, dtype=torch.float32)
+        xx, yy = torch.meshgrid(ax, ax)
+        # 计算高斯-拉普拉斯核
+        kernel = (xx**2 + yy**2 - 2 * sigma**2) / (2 * math.pi * sigma**4) * torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        # 归一化
+        kernel = kernel - kernel.mean()
+        kernel = kernel / kernel.sum()
+        log_kernel = kernel.unsqueeze(0).unsqueeze(0) # 添加 batch 和 channel 维度
+        self.LoG = nn.Conv2d(out_c, out_c, kernel_size=kernel_size, stride=1, padding=int(kernel_size // 2), groups=out_c, bias=False)
+        self.LoG.weight.data = log_kernel.repeat(out_c, 1, 1, 1)
+        self.act = nn.SiLU()
+        self.norm1 = nn.BatchNorm2d(out_c)
+        self.norm2 = nn.BatchNorm2d(out_c)
+    
+    def forward(self, x):
+        # 7x7 convolution with stride 1 for feature reinforcement, Channels from 3 to 1/4C.
+        x = self.conv_init(x)  # x = [B, C/4, H, W]
+        LoG = self.LoG(x)
+        LoG_edge = self.act(self.norm1(LoG))
+        x = self.norm2(x + LoG_edge)
+        return x
+
+class LoGStem(nn.Module):
+
+    def __init__(self, in_chans, stem_dim):
+        super().__init__()
+        out_c14 = int(stem_dim / 4)  # stem_dim / 2
+        out_c12 = int(stem_dim / 2)  # stem_dim / 2
+        # original size to 2x downsampling layer
+        self.Conv_D = nn.Sequential(
+            nn.Conv2d(out_c14, out_c12, kernel_size=3, stride=1, padding=1, groups=out_c14),
+            Conv(out_c12, out_c12, 3, 2, g=out_c12)
+            )
+        # 定义LoG滤波器
+        self.LoG = LoGFilter(in_chans, out_c14, 7, 1.0)
+        # gaussian
+        self.gaussian = Gaussian(out_c12, 9, 0.5)
+        self.norm = nn.BatchNorm2d(out_c12)
+        self.drfd = DRFD_LoG(out_c12)
+
+    def forward(self, x):
+        x = self.LoG(x)
+        # original size to 2x downsampling layer
+        x = self.Conv_D(x)
+        x = self.norm(x + self.gaussian(x))
+        x = self.drfd(x)
+
+        return x  # x = [B, C, H/4, W/4]
+
+######################################## LEGNet end ########################################
+######################################## CVPR2024 DCMPNet start ########################################
+
+class C2f_LEGM(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(LEGM(self.c) for _ in range(n))
+
+######################################## CVPR2024 DCMPNet end ########################################
+######################################## CVPR2025 LSNet start ########################################
+
+class C2f_LSBlock(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(LSBlock(self.c) for _ in range(n))
+
+class GatedLSBlock_BCHW(nn.Module):
+    r""" Our implementation of Gated CNN Block: https://arxiv.org/pdf/1612.08083
+    Args: 
+        conv_ratio: control the number of channels to conduct depthwise convolution.
+            Conduct convolution on partial channels can improve practical efficiency.
+            The idea of partial channels is from ShuffleNet V2 (https://arxiv.org/abs/1807.11164) and 
+            also used by InceptionNeXt (https://arxiv.org/abs/2303.16900) and FasterNet (https://arxiv.org/abs/2303.03667)
+    """
+    def __init__(self, dim, expansion_ratio=8/3, kernel_size=7, conv_ratio=1.0,
+                 norm_layer=partial(LayerNormGeneral,eps=1e-6,normalized_dim=(1, 2, 3)), 
+                 act_layer=nn.GELU,
+                 drop_path=0.,
+                 **kwargs):
+        super().__init__()
+        self.norm = norm_layer((dim, 1, 1))
+        hidden = int(expansion_ratio * dim)
+        self.fc1 = nn.Conv2d(dim, hidden * 2, 1)
+        self.act = act_layer()
+        conv_channels = int(conv_ratio * dim)
+        self.split_indices = (hidden, hidden - conv_channels, conv_channels)
+        # self.conv = nn.Conv2d(conv_channels, conv_channels, kernel_size=kernel_size, padding=kernel_size//2, groups=conv_channels)
+        self.conv = LSConv(conv_channels)
+        self.fc2 = nn.Conv2d(hidden, dim, 1)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, x):
+        shortcut = x # [B, H, W, C]
+        x = self.norm(x)
+        g, i, c = torch.split(self.fc1(x), self.split_indices, dim=1)
+        # c = c.permute(0, 3, 1, 2) # [B, H, W, C] -> [B, C, H, W]
+        c = self.conv(c)
+        # c = c.permute(0, 2, 3, 1) # [B, C, H, W] -> [B, H, W, C]
+        x = self.fc2(self.act(g) * torch.cat((i, c), dim=1))
+        x = self.drop_path(x)
+        return x + shortcut
+
+class C2f_MambaOut_LSConv(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(GatedLSBlock_BCHW(self.c) for _ in range(n))
+
+class LayerNormGeneral(nn.Module):
+    r""" General LayerNorm for different situations.
+
+    Args:
+        affine_shape (int, list or tuple): The shape of affine weight and bias.
+            Usually the affine_shape=C, but in some implementation, like torch.nn.LayerNorm,
+            the affine_shape is the same as normalized_dim by default. 
+            To adapt to different situations, we offer this argument here.
+        normalized_dim (tuple or list): Which dims to compute mean and variance. 
+        scale (bool): Flag indicates whether to use scale or not.
+        bias (bool): Flag indicates whether to use scale or not.
+
+        We give several examples to show how to specify the arguments.
+
+        LayerNorm (https://arxiv.org/abs/1607.06450):
+            For input shape of (B, *, C) like (B, N, C) or (B, H, W, C),
+                affine_shape=C, normalized_dim=(-1, ), scale=True, bias=True;
+            For input shape of (B, C, H, W),
+                affine_shape=(C, 1, 1), normalized_dim=(1, ), scale=True, bias=True.
+
+        Modified LayerNorm (https://arxiv.org/abs/2111.11418)
+            that is idental to partial(torch.nn.GroupNorm, num_groups=1):
+            For input shape of (B, N, C),
+                affine_shape=C, normalized_dim=(1, 2), scale=True, bias=True;
+            For input shape of (B, H, W, C),
+                affine_shape=C, normalized_dim=(1, 2, 3), scale=True, bias=True;
+            For input shape of (B, C, H, W),
+                affine_shape=(C, 1, 1), normalized_dim=(1, 2, 3), scale=True, bias=True.
+
+        For the several metaformer baslines,
+            IdentityFormer, RandFormer and PoolFormerV2 utilize Modified LayerNorm without bias (bias=False);
+            ConvFormer and CAFormer utilizes LayerNorm without bias (bias=False).
+    """
+    def __init__(self, affine_shape=None, normalized_dim=(-1, ), scale=True, 
+        bias=True, eps=1e-5):
+        super().__init__()
+        self.normalized_dim = normalized_dim
+        self.use_scale = scale
+        self.use_bias = bias
+        self.weight = nn.Parameter(torch.ones(affine_shape)) if scale else None
+        self.bias = nn.Parameter(torch.zeros(affine_shape)) if bias else None
+        self.eps = eps
+
+    def forward(self, x):
+        c = x - x.mean(self.normalized_dim, keepdim=True)
+        s = c.pow(2).mean(self.normalized_dim, keepdim=True)
+        x = c / torch.sqrt(s + self.eps)
+        if self.use_scale:
+            x = x * self.weight
+        if self.use_bias:
+            x = x + self.bias
+        return x
+
+######################################## CVPR2025 LSNet end ########################################
+######################################## Hierarchical Attention Fusion Block start ########################################
+
+class HAFB(nn.Module):
+    # Hierarchical Attention Fusion Block
+    def __init__(self, inc, ouc, group=False):
+        super(HAFB, self).__init__()
+        ch_1, ch_2 = inc
+        hidc = ouc // 2
+
+        self.lgb1_local = LocalGlobalAttention(hidc, 2)
+        self.lgb1_global = LocalGlobalAttention(hidc, 4)
+        self.lgb2_local = LocalGlobalAttention(hidc, 2)
+        self.lgb2_global = LocalGlobalAttention(hidc, 4)
+
+        self.W_x1 = Conv(ch_1, hidc, 1, act=False)
+        self.W_x2 = Conv(ch_2, hidc, 1, act=False)
+        self.W = Conv(hidc, ouc, 3, g=4)
+
+        self.conv_squeeze = Conv(ouc * 3, ouc, 1)
+        self.rep_conv = RepConv(ouc, ouc, 3, g=(16 if group else 1))
+        self.conv_final = Conv(ouc, ouc, 1)
+
+    def forward(self, inputs):
+        x1, x2 = inputs
+        W_x1 = self.W_x1(x1)
+        W_x2 = self.W_x2(x2)
+        bp = self.W(W_x1 + W_x2)
+
+        x1 = torch.cat([self.lgb1_local(W_x1), self.lgb1_global(W_x1)], dim=1)
+        x2 = torch.cat([self.lgb2_local(W_x2), self.lgb2_global(W_x2)], dim=1)
+
+        return self.conv_final(self.rep_conv(self.conv_squeeze(torch.cat([x1, x2, bp], 1))))
+
+######################################## Hierarchical Attention Fusion Block end ########################################
+######################################## DynamicConvMixerBlock start ########################################
+
+class DynamicInceptionDWConv2d(nn.Module):
+    """ Dynamic Inception depthweise convolution
+    """
+    def __init__(self, in_channels, square_kernel_size=3, band_kernel_size=11):
+        super().__init__()
+        self.dwconv = nn.ModuleList([
+            nn.Conv2d(in_channels, in_channels, square_kernel_size, padding=square_kernel_size//2, groups=in_channels),
+            nn.Conv2d(in_channels, in_channels, kernel_size=(1, band_kernel_size), padding=(0, band_kernel_size//2), groups=in_channels),
+            nn.Conv2d(in_channels, in_channels, kernel_size=(band_kernel_size, 1), padding=(band_kernel_size//2, 0), groups=in_channels)
+        ])
+        
+        self.bn = nn.BatchNorm2d(in_channels)
+        self.act = nn.SiLU()
+        
+        # Dynamic Kernel Weights
+        self.dkw = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, in_channels * 3, 1)
+        )
+        
+    def forward(self, x):
+        x_dkw = rearrange(self.dkw(x), 'bs (g ch) h w -> g bs ch h w', g=3)
+        x_dkw = F.softmax(x_dkw, dim=0)
+        x = torch.stack([self.dwconv[i](x) * x_dkw[i] for i in range(len(self.dwconv))]).sum(0)
+        return self.act(self.bn(x))
+
+class DynamicInceptionMixer(nn.Module):
+    def __init__(self, channel=256, kernels=[3, 5]):
+        super().__init__()
+        self.groups = len(kernels)
+        min_ch = channel // 2
+        
+        self.convs = nn.ModuleList([])
+        for ks in kernels:
+            self.convs.append(DynamicInceptionDWConv2d(min_ch, ks, ks * 3 + 2))
+        self.conv_1x1 = Conv(channel, channel, k=1)
+        
+    def forward(self, x):
+        _, c, _, _ = x.size()
+        x_group = torch.split(x, [c // 2, c // 2], dim=1)
+        x_group = torch.cat([self.convs[i](x_group[i]) for i in range(len(self.convs))], dim=1)
+        x = self.conv_1x1(x_group)
+        return x
+
+class DynamicIncMixerBlock(nn.Module):
+    def __init__(self, dim, drop_path=0.0):
+        super().__init__()
+        self.norm1 = nn.BatchNorm2d(dim)
+        self.norm2 = nn.BatchNorm2d(dim)
+        self.mixer = DynamicInceptionMixer(dim)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.mlp = ConvolutionalGLU(dim)
+        layer_scale_init_value = 1e-2            
+        self.layer_scale_1 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+
+    def forward(self, x):
+        x = x + self.drop_path(self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.mixer(self.norm1(x)))
+        x = x + self.drop_path(self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x)))
+        return x
+
+class C2f_DCMB(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(DynamicIncMixerBlock(self.c) for _ in range(n))
+        
+# class DynamicCIncMixerBlock_KAN(nn.Module):
+#     def __init__(self, dim, drop_path=0.0):
+#         super().__init__()
+#         self.norm1 = nn.BatchNorm2d(dim)
+#         self.norm2 = nn.BatchNorm2d(dim)
+#         self.mixer = DynamicIncMixerBlock(dim)
+#         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+#         self.mlp = KAN(dim, hidden_features=int(dim * 0.5))
+#         layer_scale_init_value = 1e-2            
+#         self.layer_scale_1 = nn.Parameter(
+#             layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+#         self.layer_scale_2 = nn.Parameter(
+#             layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+
+#     def forward(self, x):
+#         N, C, H, W = x.size()
+#         x = x + self.drop_path(self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.mixer(self.norm1(x)))
+#         x = x + self.drop_path(self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x).flatten(2).permute(0, 2, 1)).permute(0, 2, 1).view([-1, C, H, W]).contiguous())
+#         return x
+
+# class C2f_DCMB_KAN(C2f):
+#     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+#         super().__init__(c1, c2, n, shortcut, g, e)
+#         self.m = nn.ModuleList(DynamicCIncMixerBlock_KAN(self.c) for _ in range(n))
+        
+######################################## DynamicConvMixerBlock end ########################################
+######################################## TransNeXt Convolutional GLU start ########################################
+
+class ConvolutionalGLU(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.) -> None:
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        hidden_features = int(2 * hidden_features / 3)
+        self.fc1 = nn.Conv2d(in_features, hidden_features * 2, 1)
+        self.dwconv = nn.Sequential(
+            nn.Conv2d(hidden_features, hidden_features, kernel_size=3, stride=1, padding=1, bias=True, groups=hidden_features),
+            act_layer()
+        )
+        self.fc2 = nn.Conv2d(hidden_features, out_features, 1)
+        self.drop = nn.Dropout(drop)
+    
+    # def forward(self, x):
+    #     x, v = self.fc1(x).chunk(2, dim=1)
+    #     x = self.dwconv(x) * v
+    #     x = self.drop(x)
+    #     x = self.fc2(x)
+    #     x = self.drop(x)
+    #     return x
+
+    def forward(self, x):
+        x_shortcut = x
+        x, v = self.fc1(x).chunk(2, dim=1)
+        x = self.dwconv(x) * v
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x_shortcut + x
+
+class Faster_Block_CGLU(nn.Module):
+    def __init__(self,
+                 inc,
+                 dim,
+                 n_div=4,
+                 mlp_ratio=2,
+                 drop_path=0.1,
+                 layer_scale_init_value=0.0,
+                 pconv_fw_type='split_cat'
+                 ):
+        super().__init__()
+        self.dim = dim
+        self.mlp_ratio = mlp_ratio
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.n_div = n_div
+
+        self.mlp = ConvolutionalGLU(dim)
+
+        self.spatial_mixing = Partial_conv3(
+            dim,
+            n_div,
+            pconv_fw_type
+        )
+        
+        self.adjust_channel = None
+        if inc != dim:
+            self.adjust_channel = Conv(inc, dim, 1)
+
+        if layer_scale_init_value > 0:
+            self.layer_scale = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+            self.forward = self.forward_layer_scale
+        else:
+            self.forward = self.forward
+
+    def forward(self, x):
+        if self.adjust_channel is not None:
+            x = self.adjust_channel(x)
+        shortcut = x
+        x = self.spatial_mixing(x)
+        x = shortcut + self.drop_path(self.mlp(x))
+        return x
+
+    def forward_layer_scale(self, x):
+        shortcut = x
+        x = self.spatial_mixing(x)
+        x = shortcut + self.drop_path(
+            self.layer_scale.unsqueeze(-1).unsqueeze(-1) * self.mlp(x))
+        return x
+
+class C3_Faster_CGLU(C3):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.m = nn.Sequential(*(Faster_Block_CGLU(c_, c_) for _ in range(n)))
+
+class C2f_Faster_CGLU(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Faster_Block_CGLU(self.c, self.c) for _ in range(n))
+
+from timm.layers import DropPath
+class Partial_conv3(nn.Module):
+    def __init__(self, dim, n_div=4, forward='split_cat'):
+        super().__init__()
+        self.dim_conv3 = dim // n_div
+        self.dim_untouched = dim - self.dim_conv3
+        self.partial_conv3 = nn.Conv2d(self.dim_conv3, self.dim_conv3, 3, 1, 1, bias=False)
+
+        if forward == 'slicing':
+            self.forward = self.forward_slicing
+        elif forward == 'split_cat':
+            self.forward = self.forward_split_cat
+        else:
+            raise NotImplementedError
+
+    def forward_slicing(self, x):
+        # only for inference
+        x = x.clone()   # !!! Keep the original input intact for the residual connection later
+        x[:, :self.dim_conv3, :, :] = self.partial_conv3(x[:, :self.dim_conv3, :, :])
+        return x
+
+    def forward_split_cat(self, x):
+        # for training/inference
+        x1, x2 = torch.split(x, [self.dim_conv3, self.dim_untouched], dim=1)
+        x1 = self.partial_conv3(x1)
+        x = torch.cat((x1, x2), 1)
+        return x
+######################################## TransNeXt Convolutional GLU end ####################################
+######################################## Strip R-CNN start ########################################
+
+class StripMlp(nn.Module):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Conv2d(in_features, hidden_features, 1)
+        self.dwconv = DWConv(hidden_features, hidden_features)
+        self.act = act_layer()
+        self.fc2 = nn.Conv2d(hidden_features, out_features, 1)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.dwconv(x)
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+class Strip_Block(nn.Module):
+    def __init__(self, dim, k1, k2):
+        super().__init__()
+        self.conv0 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
+        self.conv_spatial1 = nn.Conv2d(dim,dim,kernel_size=(k1, k2), stride=1, padding=(k1//2, k2//2), groups=dim)     
+        self.conv_spatial2 = nn.Conv2d(dim,dim,kernel_size=(k2, k1), stride=1, padding=(k2//2, k1//2), groups=dim)
+
+        self.conv1 = nn.Conv2d(dim, dim, 1)
+
+    def forward(self, x):   
+        attn = self.conv0(x)
+        attn = self.conv_spatial1(attn)
+        attn = self.conv_spatial2(attn)
+        attn = self.conv1(attn)
+
+        return x * attn
+
+class Strip_Attention(nn.Module):
+    def __init__(self, d_model,k1,k2):
+        super().__init__()
+        self.proj_1 = nn.Conv2d(d_model, d_model, 1)
+        self.activation = nn.GELU()
+        self.spatial_gating_unit = Strip_Block(d_model,k1,k2)
+        self.proj_2 = nn.Conv2d(d_model, d_model, 1)
+
+    def forward(self, x):
+        shorcut = x.clone()
+        x = self.proj_1(x)
+        x = self.activation(x)
+        # x = self.spatial_gating_unit(x)
+        x = self.proj_2(x)
+        x = x + shorcut
+        return x
+
+class StripBlock(nn.Module):
+    def __init__(self, dim, mlp_ratio=4., k1=1, k2=19, drop=0.,drop_path=0., act_layer=nn.GELU):
+        super().__init__()
+        self.norm1 = nn.BatchNorm2d(dim)
+        self.norm2 = nn.BatchNorm2d(dim)
+        self.attn = Strip_Attention(dim, k1, k2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = StripMlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        layer_scale_init_value = 1e-2            
+        self.layer_scale_1 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+
+    def forward(self, x):
+        x = x + self.drop_path(self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x)))
+        return x
+
+class C2f_Strip(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(StripBlock(self.c) for _ in range(n))
+
+class StripCGLU(nn.Module):
+    def __init__(self, dim, mlp_ratio=4., k1=1, k2=19, drop=0.,drop_path=0., act_layer=nn.GELU):
+        super().__init__()
+        self.norm1 = nn.BatchNorm2d(dim)
+        self.norm2 = nn.BatchNorm2d(dim)
+        self.attn = Strip_Attention(dim,k1,k2)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.mlp = ConvolutionalGLU(dim)
+        layer_scale_init_value = 1e-2            
+        self.layer_scale_1 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+        self.layer_scale_2 = nn.Parameter(
+            layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+
+    def forward(self, x):
+        x = x + self.drop_path(self.layer_scale_1.unsqueeze(-1).unsqueeze(-1) * self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.layer_scale_2.unsqueeze(-1).unsqueeze(-1) * self.mlp(self.norm2(x)))
+        return x
+
+class C2f_StripCGLU(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(StripCGLU(self.c) for _ in range(n))
+        
+######################################## Strip R-CNN end ########################################
+######################################## Pinwheel-shaped Convolution and Scale-based Dynamic Loss for Infrared Small Target Detection end ########################################
+
+class HaarWaveletConv(nn.Module):
+    def __init__(self, in_channels, grad=False):
+        super(HaarWaveletConv, self).__init__()
+        self.in_channels = in_channels
+
+        self.haar_weights = torch.ones(4, 1, 2, 2)
+        #h
+        self.haar_weights[1, 0, 0, 1] = -1
+        self.haar_weights[1, 0, 1, 1] = -1
+        #v
+        self.haar_weights[2, 0, 1, 0] = -1
+        self.haar_weights[2, 0, 1, 1] = -1
+        #d
+        self.haar_weights[3, 0, 1, 0] = -1
+        self.haar_weights[3, 0, 0, 1] = -1
+
+        self.haar_weights = torch.cat([self.haar_weights] * self.in_channels, 0)
+        self.haar_weights = nn.Parameter(self.haar_weights)
+        self.haar_weights.requires_grad = grad
+
+    def forward(self, x):
+        B, _, H, W = x.size()
+        x = F.pad(x, [0, 1, 0, 1], value=0)
+        out = F.conv2d(x, self.haar_weights, bias=None, stride=1, groups=self.in_channels) / 4.0
+        out = out.reshape([B, self.in_channels, 4, H, W])
+        out = torch.transpose(out, 1, 2).contiguous()
+        out = out.reshape([B, self.in_channels * 4, H, W])
+        
+        # a (approximation): 低频信息，图像的平滑部分，代表了图像的整体结构。
+        # h (horizontal): 水平方向的高频信息，捕捉水平方向上的边缘或变化。
+        # v (vertical): 垂直方向的高频信息，捕捉垂直方向上的边缘或变化。
+        # d (diagonal): 对角线方向的高频信息，捕捉对角线方向上的边缘或纹理。
+        a, h, v, d = out.chunk(4, 1)
+        
+        # 低频，高频
+        return a, h + v + d
+
+class ContrastDrivenFeatureAggregation(nn.Module):
+    def __init__(self, dim, num_heads=8, kernel_size=3, padding=1, stride=1,
+                 attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.stride = stride
+        self.head_dim = dim // num_heads
+
+        self.scale = self.head_dim ** -0.5
+
+        self.wavelet = HaarWaveletConv(dim)
+
+        self.v = nn.Linear(dim, dim)
+        self.attn_fg = nn.Linear(dim, kernel_size ** 4 * num_heads)
+        self.attn_bg = nn.Linear(dim, kernel_size ** 4 * num_heads)
+
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        self.unfold = nn.Unfold(kernel_size=kernel_size, padding=padding, stride=stride)
+        self.pool = nn.AvgPool2d(kernel_size=stride, stride=stride, ceil_mode=True)
+
+        self.input_cbr = nn.Sequential(
+            Conv(dim, dim, 3),
+            Conv(dim, dim, 3),
+        )
+        self.output_cbr = nn.Sequential(
+            Conv(dim, dim, 3),
+            Conv(dim, dim, 3),
+        )
+
+    def forward(self, x):
+        x = self.input_cbr(x)
+        bg, fg = self.wavelet(x)
+
+        x = x.permute(0, 2, 3, 1).contiguous()
+        fg = fg.permute(0, 2, 3, 1).contiguous()
+        bg = bg.permute(0, 2, 3, 1).contiguous()
+
+        B, H, W, C = x.shape
+
+        v = self.v(x).permute(0, 3, 1, 2).contiguous()
+
+        v_unfolded = self.unfold(v).reshape(B, self.num_heads, self.head_dim,
+                                            self.kernel_size * self.kernel_size,
+                                            -1).permute(0, 1, 4, 3, 2).contiguous()
+        attn_fg = self.compute_attention(fg, B, H, W, C, 'fg')
+
+        x_weighted_fg = self.apply_attention(attn_fg, v_unfolded, B, H, W, C)
+
+        v_unfolded_bg = self.unfold(x_weighted_fg.permute(0, 3, 1, 2)).reshape(B, self.num_heads, self.head_dim,
+                                                                               self.kernel_size * self.kernel_size,
+                                                                               -1).permute(0, 1, 4, 3, 2).contiguous()
+        attn_bg = self.compute_attention(bg, B, H, W, C, 'bg')
+
+        x_weighted_bg = self.apply_attention(attn_bg, v_unfolded_bg, B, H, W, C)
+
+        x_weighted_bg = x_weighted_bg.permute(0, 3, 1, 2).contiguous()
+
+        out = self.output_cbr(x_weighted_bg)
+
+        return out
+
+    def compute_attention(self, feature_map, B, H, W, C, feature_type):
+
+        attn_layer = self.attn_fg if feature_type == 'fg' else self.attn_bg
+        h, w = math.ceil(H / self.stride), math.ceil(W / self.stride)
+
+        feature_map_pooled = self.pool(feature_map.permute(0, 3, 1, 2).contiguous()).permute(0, 2, 3, 1).contiguous()
+
+        attn = attn_layer(feature_map_pooled).reshape(B, h * w, self.num_heads,
+                                                      self.kernel_size * self.kernel_size,
+                                                      self.kernel_size * self.kernel_size).permute(0, 2, 1, 3, 4).contiguous()
+        attn = attn * self.scale
+        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_drop(attn)
+        return attn
+
+    def apply_attention(self, attn, v, B, H, W, C):
+
+        x_weighted = (attn @ v).permute(0, 1, 4, 3, 2).reshape(
+            B, self.dim * self.kernel_size * self.kernel_size, -1)
+        x_weighted = F.fold(x_weighted, output_size=(H, W), kernel_size=self.kernel_size,
+                            padding=self.padding, stride=self.stride)
+        x_weighted = self.proj(x_weighted.permute(0, 2, 3, 1).contiguous())
+        x_weighted = self.proj_drop(x_weighted)
+        return x_weighted
+
+######################################## Pinwheel-shaped Convolution and Scale-based Dynamic Loss for Infrared Small Target Detection end ########################################
+######################################## ICCV2023 CRAFT start ########################################
+
+class HFERB(nn.Module):
+    def __init__(self, dim) -> None:
+        super().__init__()
+        self.mid_dim = dim//2
+        self.dim = dim
+        self.act = nn.GELU()
+        self.last_fc = nn.Conv2d(self.dim, self.dim, 1)
+
+        # High-frequency enhancement branch
+        self.fc = nn.Conv2d(self.mid_dim, self.mid_dim, 1)
+        self.max_pool = nn.MaxPool2d(3, 1, 1)
+
+        # Local feature extraction branch
+        self.conv = nn.Conv2d(self.mid_dim, self.mid_dim, 3, 1, 1)
+
+    def forward(self, x):
+        self.h, self.w = x.shape[2:]
+        short = x
+
+        # Local feature extraction branch
+        lfe = self.act(self.conv(x[:,:self.mid_dim,:,:]))
+
+        # High-frequency enhancement branch
+        hfe = self.act(self.fc(self.max_pool(x[:,self.mid_dim:,:,:])))
+
+        x = torch.cat([lfe, hfe], dim=1)
+        x = short + self.last_fc(x)
+        return x
+
+class C2f_HFERB(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(HFERB(self.c) for _ in range(n))
+
+######################################## ICCV2023 CRAFT end ########################################

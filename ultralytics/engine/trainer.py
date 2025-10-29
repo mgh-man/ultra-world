@@ -20,6 +20,7 @@ import numpy as np
 import torch
 from torch import distributed as dist
 from torch import nn, optim
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
@@ -272,6 +273,24 @@ class BaseTrainer:
         )
         if world_size > 1:
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
+
+            # 创建 DDP（示例：放在模型构建并移动到 device 之后）
+            # self.model = DDP(
+            #     self.model,
+            #     device_ids=[self.device.index] if self.device.type == "cuda" else None,
+            #     output_device=self.device.index if self.device.type == "cuda" else None,
+            #     find_unused_parameters=getattr(self.args, "find_unused_parameters", False),
+            #     gradient_as_bucket_view=False,  # 关闭 bucket 视图共享，避免步幅不一致警告
+            # )
+
+            # # 可选：为所有参数注册梯度 contiguous 钩子（双保险）
+            # try:
+            #     params = list(self.model.module.parameters()) if hasattr(self.model, "module") else list(self.model.parameters())
+            #     for p in params:
+            #         if p.requires_grad:
+            #             p.register_hook(lambda g: g.contiguous())
+            # except Exception:
+            #     pass
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)

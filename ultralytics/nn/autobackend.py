@@ -549,7 +549,7 @@ class AutoBackend(nn.Module):
         if self.fp16 and im.dtype != torch.float16:
             im = im.half()  # to FP16
         if self.nhwc:
-            im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
+            im = im.permute(0, 2, 3, 1).contiguous()  # torch BCHW to numpy BHWC shape(1,320,192,3)
 
         # PyTorch
         if self.pt or self.nn_module:
@@ -731,7 +731,7 @@ class AutoBackend(nn.Module):
                 if y[1].shape[-1] == 6:  # end-to-end model
                     y = [y[1]]
                 else:
-                    y[1] = np.transpose(y[1], (0, 3, 1, 2))  # should be y = (1, 116, 8400), (1, 32, 160, 160)
+                    y[1] = np.transpose(y[1], (0, 3, 1, 2)).contiguous()  # should be y = (1, 116, 8400), (1, 32, 160, 160)
             y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
 
         # for x in y:

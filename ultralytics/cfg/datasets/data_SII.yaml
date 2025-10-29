@@ -1,6 +1,8 @@
 # dataset path
 path: /mnt/datasets/manfenglin/
 train: ./dataset_SII/images/trainval
+# val: ./isdd+sii/images/test
+# test: ./isdd+sii/images/test
 val: ./dataset_SII/images/test
 test: ./dataset_SII/images/test
 

@@ -73,21 +73,23 @@ class YOLOWorld(Model):
             model (str | Path): Path to the pre-trained model file. Supports *.pt and *.yaml formats.
             verbose (bool): If True, prints additional information during initialization.
         """
+        # 调用父类Model的初始化方法，设置任务类型为"detect"
         super().__init__(model=model, task="detect", verbose=verbose)
 
-        # Assign default COCO class names when there are no custom names
+        # 如果模型没有类别名称属性，则分配默认的COCO数据集类别名称
         if not hasattr(self.model, "names"):
             self.model.names = yaml_load(ROOT / "cfg/datasets/coco8.yaml").get("names")
 
     @property
     def task_map(self):
         """Map head to model, validator, and predictor classes."""
+        # 返回任务映射字典，将检测任务映射到对应的模型、验证器、预测器和训练器类
         return {
             "detect": {
-                "model": WorldModel,
-                "validator": yolo.detect.DetectionValidator,
-                "predictor": yolo.detect.DetectionPredictor,
-                "trainer": yolo.world.WorldTrainer,
+                "model": WorldModel,  # 使用WorldModel作为模型类
+                "validator": yolo.detect.DetectionValidator,  # 检测验证器
+                "predictor": yolo.detect.DetectionPredictor,  # 检测预测器
+                "trainer": yolo.world.WorldTrainer,  # YOLOWorld专用训练器
             }
         }
 
@@ -98,14 +100,18 @@ class YOLOWorld(Model):
         Args:
             classes (List(str)): A list of categories i.e. ["person"].
         """
+        # 设置模型的类别
         self.model.set_classes(classes)
-        # Remove background if it's given
+        
+        # 如果类别列表中包含背景类，则移除它
         background = " "
         if background in classes:
             classes.remove(background)
+        
+        # 更新模型的类别名称
         self.model.names = classes
 
-        # Reset method class names
+        # 重置预测器的类别名称，避免使用旧的类别名称
         # self.predictor = None  # reset predictor otherwise old names remain
         if self.predictor:
             self.predictor.model.names = classes

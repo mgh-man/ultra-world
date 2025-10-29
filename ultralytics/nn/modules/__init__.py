@@ -16,7 +16,7 @@ Example:
     os.system(f"onnxslim {f} {f} && open {f}")  # pip install onnxslim
     ```
 """
-
+from .mhafyolo import *
 from .block import (
     C1,
     C2,
@@ -71,6 +71,19 @@ from .block import (
     WaveletUnPool,
     WaveletPool,
     EUCB,
+    SDI,
+    C2f_EBlock,
+    C2f_DBlock,
+    C2f_LFEM,
+    LoGStem,
+    C2f_LEGM,
+    C2f_LSBlock,
+    HAFB,
+    C2f_DCMB,
+    C2f_Strip,
+    C2f_StripCGLU,
+    ContrastDrivenFeatureAggregation,
+    C2f_HFERB,
 )
 from .conv import (
     CBAM,
@@ -176,4 +189,11 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+    "C2f_EBlock",
+    "C2f_DBlock",
+    "C2f_LFEM",
+    "LoGStem",
+    "C2f_LEGM",
+    "PSConv",
+    "HAFB",
 )

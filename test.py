@@ -2,47 +2,57 @@ from ultralytics import YOLOWorld
 from ultralytics.models.yolo.world.train_world import WorldTrainerFromScratch
 import torch
 import warnings
+import os
+import wandb
+
+# wandb.login(key="4a254fcafc59057c8d5d48ec30a4f290a2109b00")
+# os.environ["WANDB_API_KEY"] = "4a254fcafc59057c8d5d48ec30a4f290a2109b00"
 
 # 禁用确定性算法以避免CUDA操作警告
-torch.use_deterministic_algorithms(False)
+# torch.use_deterministic_algorithms(False)
 
 # 或者如果需要保持部分确定性，可以只禁用警告
 # torch.use_deterministic_algorithms(True, warn_only=True)
-warnings.filterwarnings("ignore", message=".*does not have a deterministic implementation.*")
+# warnings.filterwarnings("ignore", message=".*does not have a deterministic implementation.*")
 data = dict(
     train=dict(
-        yolo_data=["ISDD+SII.yaml","ISDD+SII2.yaml"],
-        # yolo_data=["data_isddPLUS.yaml"],
+        # yolo_data=["ISDD+SII2.yaml"],
+        yolo_data=["data_SII.yaml"],
         grounding_data=[
             # dict(
             #     img_path="/mnt/datasets/manfenglin/ISDD/images/val",
             #     # json_file="/mnt/code/manfenglin/ultralytics/datasets/flickr30k/final_flickr_separateGT_test.json",
             #     json_file="/mnt/code/manfenglin/ultralytics/datasets/isdd/val_converted.json",
             # ),
-            # dict(
-            #     img_path="/mnt/datasets/manfenglin/dataset_SII/images/train",
-            #     json_file="/mnt/code/manfenglin/ultralytics/datasets/sii/train_converted.json",
-            # ),
+            dict(
+                img_path="/mnt/datasets/manfenglin/dataset_SII/images/train",
+                json_file="/mnt/code/manfenglin/ultralytics/datasets/sii/train_converted.json",
+            ),
             # dict(
             #     img_path="/mnt/datasets/manfenglin/dataset_SII/images/val",
             #     json_file="/mnt/code/manfenglin/ultralytics/datasets/sii/val_converted.json",
             # ),
-            dict(
-                img_path="/mnt/datasets/manfenglin/ISDD/images/train",
-                json_file="/mnt/code/manfenglin/ultralytics/datasets/isdd/train.json",
-            ),
+            # dict(
+            #     img_path="/mnt/datasets/manfenglin/ISDD/images/train",
+            #     json_file="/mnt/code/manfenglin/ultralytics/datasets/isdd/train.json",
+            # ),
             # dict(
             #     img_path="/mnt/datasets/manfenglin/sfisd/images/train",
             #     json_file="/mnt/code/manfenglin/ultralytics/datasets/sfisd/train_converted.json",
             # ),
+            # dict(
+            #     img_path="/mnt/datasets/manfenglin/dataset_SII/images/train",
+            #     json_file="/mnt/code/manfenglin/ultralytics/datasets/sii/train2.0_converted.json",
+            # ),
         ],
     ),
-    val=dict(yolo_data=["ISDD+SII.yaml"]),
+    # val=dict(yolo_data=["ISDD+SII2.yaml"]),
+    val=dict(yolo_data=["data_SII.yaml"]),
 )
-model = YOLOWorld("yolov8x-worldv2-psconv2-wavepool.yaml")
-# model = YOLOWorld("yolov8l-worldv2.pt")
+model = YOLOWorld("yolov8x-worldv2-HAFB2.yaml")
+# model = YOLOWorld("/mnt/code/manfenglin/ultralytics/runs/pretrain/xv2-device7-mixup-HAFB(2,3,4)-psconv-p2-pka7-3-5500-batch8-albumentions/weights/last.pt")
 
-# result = model.model.load_state_dict(torch.load("yolov8x-worldv2.pt")['model'].state_dict(), strict=False)
+# result = model.model.load_state_dict(torch.load("yolov8x-worldv2.pt")['model'].state_dict(), strict=False)yolov8x-worldv2.pt
 
 # print("="*80)
 # print("模型加载结果详细解析:")
@@ -110,4 +120,11 @@ model = YOLOWorld("yolov8x-worldv2-psconv2-wavepool.yaml")
 # print(f"总成功率: {loaded_count}/{len(pretrained_state_dict)} ({loaded_count/len(pretrained_state_dict)*100:.1f}%)")
 
 model.train(data=data, batch=8, epochs=150, trainer=WorldTrainerFromScratch, 
-            project='runs/ISDD/new/Tra-trainval(isdd-noValText)+Te-Test(isdd)', name='xv2-pscov-pka7-3-wavepool', device='1')
+            # project='runs/ISDD/new/Tra-trainval(isdd-noValText)+Te-Test(isdd)', name='cocopretrain(best)-xv2-device5-mixup0.1-HAFB(2,3,4)-psconv-p2-pka7-3-5500-batch8-albumentions',device='5')
+            project='runs/SII/new/Tra-trainval(sii-noValText)+Te-Test(sii)', name='xv2-device7-mixup0.1-HAFB2.0ture45-pka7-3-5500-batch8-albumentions',device='7')
+# print("训练完成，开始单独验证...")
+# try:
+#     results = model.val(data=data['val'], device='0')
+#     print(f"验证结果: {results}")
+# except Exception as e:
+#     print(f"验证失败: {e}")HAFB(2,3,4)-psconv-pka7-3-p2

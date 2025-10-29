@@ -12,6 +12,211 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
+# def extract_bbox_pixels(image, bboxes):
+#     """
+#     Extract pixels from the image within the given bounding boxes.
+    
+#     Args:
+#     - image: NumPy array representing the image.
+#     - bboxes: List of bounding boxes, each a tuple (left, top, right, bottom).
+    
+#     Returns:
+#     - List of pixel arrays corresponding to each bounding box.
+#     """
+#     pixels_list = []
+#     for bbox in bboxes:
+#         left, top, right, bottom = bbox
+        
+#         # 添加 NaN 检查
+#         if any(np.isnan([left, top, right, bottom])):
+#             print(f"警告: 检测到 NaN 坐标值: left={left}, top={top}, right={right}, bottom={bottom}")
+#             continue  # 跳过包含 NaN 的边界框
+            
+#         # 添加无穷大检查
+#         if any(np.isinf([left, top, right, bottom])):
+#             print(f"警告: 检测到无穷大坐标值: left={left}, top={top}, right={right}, bottom={bottom}")
+#             continue
+            
+#         try:
+#             clipped_left = max(0, int(round(left)))
+#             clipped_top = max(0, int(round(top)))
+#             clipped_right = min(image.shape[1], int(round(right)))
+#             clipped_bottom = min(image.shape[0], int(round(bottom)))
+            
+#             # 确保边界框有效
+#             if clipped_right > clipped_left and clipped_bottom > clipped_top:
+#                 pixels = image[clipped_top:clipped_bottom, clipped_left:clipped_right]
+#                 pixels_list.append(pixels)
+#             else:
+#                 print(f"警告: 无效边界框尺寸: ({clipped_left}, {clipped_top}, {clipped_right}, {clipped_bottom})")
+                
+#         except ValueError as e:
+#             print(f"坐标转换错误: {e}, 坐标值: left={left}, top={top}, right={right}, bottom={bottom}")
+#             continue
+            
+#     return pixels_list
+
+# def adjust_boxes(pred_boxes, target_boxes):
+#     """
+#     Adjusts the predicted and target bounding boxes to have the same aspect ratio.
+#     """
+#     img_width, img_height = 640, 640  # Assuming a fixed image size of 640x640
+
+#     adjusted_pred_boxes = []
+#     adjusted_target_boxes = []
+
+#     for box_pred, box_target in zip(pred_boxes, target_boxes):
+#         # 以下自己写，使得两个box宽高一样
+#         # pred_width = box_pred[2] - box_pred[0]
+#         # pred_height = box_pred[3] - box_pred[1]
+#         # target_width = box_target[2] - box_target[0]
+#         # target_height = box_target[3] - box_target[1]
+#         # width_cha = max(pred_width,target_width) - min(pred_width,target_width)
+#         # height_cha = max(pred_height,target_height) - min(pred_height,target_height)
+#         # if pred_width > target_width:
+#         #     box_pred[2] = box_pred[2] - width_cha
+#         # else:
+#         #     box_target[2] = box_target[2] - width_cha
+
+#         # if pred_height > target_height:
+#         #     box_pred[3] = box_pred[3] - height_cha
+#         # else:
+#         #     box_target[3] = box_target[3] - height_cha
+#         pred_center_width = (box_pred[2]+box_pred[0]) / 2
+#         pred_center_height = (box_pred[3]+box_pred[1]) / 2
+#         target_center_width = (box_target[2]+box_target[0]) / 2
+#         target_center_height = (box_target[3]+box_target[1]) / 2
+#         pred_width = box_pred[2] - box_pred[0]
+#         pred_height = box_pred[3] - box_pred[1]
+#         target_width = box_target[2] - box_target[0]
+#         target_height = box_target[3] - box_target[1]
+#         if pred_width > target_width:
+#             box_pred[2] = pred_center_width + target_width / 2
+#             box_pred[0] = pred_center_width - target_width / 2
+#         else:
+#             box_target[2] = target_center_width + pred_width / 2
+#             box_target[0] = target_center_width - pred_width / 2
+
+        
+#         if pred_height > target_height:
+#             box_pred[3] = pred_center_height + target_height / 2
+#             box_pred[1] = pred_center_height - target_height / 2
+#         else:
+#             box_target[3] = target_center_height + pred_height / 2
+#             box_target[1] = target_center_height - pred_height / 2
+  
+#         adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
+#         adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
+        
+  
+#         # adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
+#         # adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
+
+#     return adjusted_pred_boxes, adjusted_target_boxes
+
+# def quick_adjust_boxes(pred_boxes, target_boxes):
+#     """
+#     Adjusts the predicted and target bounding boxes to have the same aspect ratio using NumPy for efficiency.
+#     """
+#     # 确保输入是NumPy数组
+#     pred_boxes = np.array(pred_boxes)
+#     target_boxes = np.array(target_boxes)
+    
+#     # 预计算宽度和高度
+#     pred_widths = pred_boxes[:, 2] - pred_boxes[:, 0]
+#     pred_heights = pred_boxes[:, 3] - pred_boxes[:, 1]
+#     target_widths = target_boxes[:, 2] - target_boxes[:, 0]
+#     target_heights = target_boxes[:, 3] - target_boxes[:, 1]
+    
+#     # 计算中心点
+#     pred_centers_x = (pred_boxes[:, 2] + pred_boxes[:, 0]) / 2
+#     pred_centers_y = (pred_boxes[:, 3] + pred_boxes[:, 1]) / 2
+#     target_centers_x = (target_boxes[:, 2] + target_boxes[:, 0]) / 2
+#     target_centers_y = (target_boxes[:, 3] + target_boxes[:, 1]) / 2
+    
+#     # 创建调整后的边界框数组（如果不希望修改原数组，可以在这里创建副本）
+#     adjusted_pred_boxes = pred_boxes.copy()
+#     adjusted_target_boxes = target_boxes.copy()
+    
+#     # 根据宽度和高度调整边界框
+#     mask_wider = pred_widths > target_widths
+#     mask_taller = pred_heights > target_heights
+    
+#     adjusted_pred_boxes[mask_wider, 2] = pred_centers_x[mask_wider] + target_widths[mask_wider] / 2
+#     adjusted_pred_boxes[mask_wider, 0] = pred_centers_x[mask_wider] - target_widths[mask_wider] / 2
+#     adjusted_target_boxes[~mask_wider, 2] = target_centers_x[~mask_wider] + pred_widths[~mask_wider] / 2
+#     adjusted_target_boxes[~mask_wider, 0] = target_centers_x[~mask_wider] - pred_widths[~mask_wider] / 2
+    
+#     adjusted_pred_boxes[mask_taller, 3] = pred_centers_y[mask_taller] + target_heights[mask_taller] / 2
+#     adjusted_pred_boxes[mask_taller, 1] = pred_centers_y[mask_taller] - target_heights[mask_taller] / 2
+#     adjusted_target_boxes[~mask_taller, 3] = target_centers_y[~mask_taller] + pred_heights[~mask_taller] / 2
+#     adjusted_target_boxes[~mask_taller, 1] = target_centers_y[~mask_taller] - pred_heights[~mask_taller] / 2
+
+#     # 返回调整后的边界框列表（这里直接返回数组，也可以转换为列表）
+#     return adjusted_pred_boxes.tolist(), adjusted_target_boxes.tolist()
+
+# def pixel_difference_loss(img, pred_boxes, target_boxes):
+#     """修复边界框数量不匹配问题的像素差异损失"""
+#     try:
+#         # 添加边界框数量检查
+#         if len(pred_boxes) == 0 or len(target_boxes) == 0:
+#             print(f"警告: 空边界框列表 - pred: {len(pred_boxes)}, target: {len(target_boxes)}")
+#             return torch.tensor(0.0, requires_grad=True)
+        
+#         # 使用更高效的边界框调整函数
+#         adjusted_pred_boxes, adjusted_target_boxes = quick_adjust_boxes(pred_boxes, target_boxes)
+        
+#         # 验证调整后的边界框
+#         valid_pred_boxes = []
+#         valid_target_boxes = []
+        
+#         for pred_box, target_box in zip(adjusted_pred_boxes, adjusted_target_boxes):
+#             # 检查边界框有效性
+#             if (not np.any(np.isnan(pred_box)) and not np.any(np.isnan(target_box)) and
+#                 not np.any(np.isinf(pred_box)) and not np.any(np.isinf(target_box))):
+#                 valid_pred_boxes.append(pred_box)
+#                 valid_target_boxes.append(target_box)
+        
+#         if len(valid_pred_boxes) == 0:
+#             print("警告: 没有有效的边界框")
+#             return torch.tensor(0.0, requires_grad=True)
+        
+#         # 提取像素并计算损失
+#         adjusted_pred_pixels_list = extract_bbox_pixels(img, valid_pred_boxes)
+#         adjusted_target_pixels_list = extract_bbox_pixels(img, valid_target_boxes)
+
+#         # 确保像素列表长度一致
+#         min_length = min(len(adjusted_pred_pixels_list), len(adjusted_target_pixels_list))
+#         if min_length == 0:
+#             print("警告: 无法提取有效像素")
+#             return torch.tensor(0.0, requires_grad=True)
+        
+#         adjusted_pred_pixels_list = adjusted_pred_pixels_list[:min_length]
+#         adjusted_target_pixels_list = adjusted_target_pixels_list[:min_length]
+
+#         total_difference = 0
+#         valid_comparisons = 0
+        
+#         for pred_pixels, target_pixels in zip(adjusted_pred_pixels_list, adjusted_target_pixels_list):
+#             # 确保两个框的形状相同
+#             if pred_pixels.shape == target_pixels.shape:
+#                 difference = np.abs(pred_pixels - target_pixels)
+#                 total_difference += difference.sum()
+#                 valid_comparisons += 1
+
+#         if valid_comparisons == 0:
+#             print("警告: 没有有效的像素比较")
+#             return torch.tensor(0.0, requires_grad=True)
+            
+#         average_difference = total_difference / valid_comparisons
+#         return torch.tensor(average_difference, dtype=torch.float32, requires_grad=True)
+        
+#     except Exception as e:
+#         print(f"像素差异损失计算出错: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         return torch.tensor(0.0, requires_grad=True)
+    
 def extract_bbox_pixels(image, bboxes):
     """
     Extract pixels from the image within the given bounding boxes.
@@ -24,9 +229,29 @@ def extract_bbox_pixels(image, bboxes):
     - List of pixel arrays corresponding to each bounding box.
     """
     pixels_list = []
+    # for bbox in bboxes:
+    #     left, top, right, bottom = bbox
+    #     # Ensure the bounding box coordinates are within image boundaries
+    #     clipped_left = max(0, int(round(left)))
+    #     clipped_top = max(0, int(round(top)))
+    #     clipped_right = min(image.shape[1], int(round(right)))
+    #     clipped_bottom = min(image.shape[0], int(round(bottom)))
     for bbox in bboxes:
         left, top, right, bottom = bbox
-        # Ensure the bounding box coordinates are within image boundaries
+        
+        # 检查是否有NaN值
+        if any(np.isnan([left, top, right, bottom])):
+            print(f"Warning: NaN detected in bbox: {bbox}, skipping...")
+            pixels_list.append(np.zeros((1, 1)))
+            continue
+            
+        # 确保坐标在有效范围内
+        height, width = image.shape[:2] if len(image.shape) == 3 else image.shape
+        left = max(0, min(width-1, left))
+        top = max(0, min(height-1, top))
+        right = max(0, min(width-1, right))
+        bottom = max(0, min(height-1, bottom))
+        
         clipped_left = max(0, int(round(left)))
         clipped_top = max(0, int(round(top)))
         clipped_right = min(image.shape[1], int(round(right)))
@@ -96,8 +321,8 @@ def adjust_boxes(pred_boxes, target_boxes):
         adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
         
   
-        adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
-        adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
+        # adjusted_pred_boxes.append([box_pred[0], box_pred[1], box_pred[2], box_pred[3]])
+        # adjusted_target_boxes.append([box_target[0], box_target[1], box_target[2], box_target[3]])
 
     return adjusted_pred_boxes, adjusted_target_boxes
 
@@ -141,35 +366,94 @@ def quick_adjust_boxes(pred_boxes, target_boxes):
 
     # 返回调整后的边界框列表（这里直接返回数组，也可以转换为列表）
     return adjusted_pred_boxes.tolist(), adjusted_target_boxes.tolist()
+# def pixel_difference_loss(img, pred_boxes, target_boxes):
+#     """
+#     Compute pixel difference loss for the corresponding regions of predicted and target boxes,
+#     after adjusting them to have the same dimensions.
+#     """
+#     # Adjust boxes to have the same size
+#     adjusted_pred_boxes, adjusted_target_boxes = quick_adjust_boxes(pred_boxes, target_boxes)
 
+#     # Extract pixels
+#     adjusted_pred_pixels_list = extract_bbox_pixels(img, adjusted_pred_boxes)
+#     adjusted_target_pixels_list = extract_bbox_pixels(img, adjusted_target_boxes)
+
+#     # Check for consistency
+#     if len(adjusted_pred_pixels_list) != len(adjusted_target_pixels_list):
+#         raise ValueError("Unequal number of adjusted boxes after resizing.")
+
+#     total_difference = 0
+#     for pred_pixels, target_pixels in zip(adjusted_pred_pixels_list, adjusted_target_pixels_list):
+#         # Ensure both boxes have the same shape before taking the differenc
+        
+#         # Compute absolute difference
+#         if pred_pixels.shape == target_pixels.shape:
+#             #避免了77和 78的情况，该手段防止了调整box越界情况
+#             difference = np.abs(pred_pixels - target_pixels)
+#             total_difference += difference.sum()
+
+#     average_difference = total_difference / len(adjusted_pred_pixels_list)
+#     return torch.tensor(average_difference)
 def pixel_difference_loss(img, pred_boxes, target_boxes):
     """
-    Compute pixel difference loss for the corresponding regions of predicted and target boxes,
-    after adjusting them to have the same dimensions.
+    使用 PyTorch 计算像素差异损失，避免 NumPy 溢出
     """
-    # Adjust boxes to have the same size
-    adjusted_pred_boxes, adjusted_target_boxes = quick_adjust_boxes(pred_boxes, target_boxes)
-
-    # Extract pixels
-    adjusted_pred_pixels_list = extract_bbox_pixels(img, adjusted_pred_boxes)
-    adjusted_target_pixels_list = extract_bbox_pixels(img, adjusted_target_boxes)
-
-    # Check for consistency
-    if len(adjusted_pred_pixels_list) != len(adjusted_target_pixels_list):
-        raise ValueError("Unequal number of adjusted boxes after resizing.")
-
-    total_difference = 0
-    for pred_pixels, target_pixels in zip(adjusted_pred_pixels_list, adjusted_target_pixels_list):
-        # Ensure both boxes have the same shape before taking the differenc
+    try:
+        # 转换为 Torch Tensor（如果还不是）
+        if not isinstance(img, torch.Tensor):
+            img_tensor = torch.from_numpy(img).float()
+        else:
+            img_tensor = img.float()
         
-        # Compute absolute difference
-        if pred_pixels.shape == target_pixels.shape:
-            #避免了77和 78的情况，该手段防止了调整box越界情况
-            difference = np.abs(pred_pixels - target_pixels)
-            total_difference += difference.sum()
+        pred_boxes = np.array(pred_boxes)
+        target_boxes = np.array(target_boxes)
+        
+        # 边界框调整
+        adjusted_pred_boxes, adjusted_target_boxes = quick_adjust_boxes(pred_boxes, target_boxes)
+        
+        # 验证有效性
+        valid_pred = []
+        valid_target = []
+        for pred_box, target_box in zip(adjusted_pred_boxes, adjusted_target_boxes):
+            if (not np.any(np.isnan(pred_box)) and not np.any(np.isnan(target_box)) and
+                not np.any(np.isinf(pred_box)) and not np.any(np.isinf(target_box))):
+                valid_pred.append(pred_box)
+                valid_target.append(target_box)
+        
+        if len(valid_pred) == 0:
+            return torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
+        
+        # 提取像素（仍用 NumPy，但立即转为 Torch）
+        pred_pixels_list = extract_bbox_pixels(img if isinstance(img, np.ndarray) else img.cpu().numpy(), valid_pred)
+        target_pixels_list = extract_bbox_pixels(img if isinstance(img, np.ndarray) else img.cpu().numpy(), valid_target)
+        
+        min_length = min(len(pred_pixels_list), len(target_pixels_list))
+        if min_length == 0:
+            return torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
+        
+        # 用 Torch 累加（避免溢出）
+        total_diff = torch.tensor(0.0, dtype=torch.float32)
+        valid_count = 0
+        
+        for pred_pix, tgt_pix in zip(pred_pixels_list[:min_length], target_pixels_list[:min_length]):
+            if pred_pix.shape == tgt_pix.shape and pred_pix.size > 0:
+                pred_t = torch.from_numpy(pred_pix).float()
+                tgt_t = torch.from_numpy(tgt_pix).float()
+                diff = torch.abs(pred_t - tgt_t).sum()
+                total_diff = total_diff + diff  # Torch 累加，自动防溢出
+                valid_count += 1
+        
+        if valid_count == 0:
+            return torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
+        
+        avg_diff = total_diff / valid_count
+        return avg_diff.clone().detach().requires_grad_(True)
+        
+    except Exception as e:
+        print(f"像素差异损失计算出错: {e}")
+        return torch.tensor(0.0, dtype=torch.float32, requires_grad=True)
+    
 
-    average_difference = total_difference / len(adjusted_pred_pixels_list)
-    return torch.tensor(average_difference)
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
@@ -415,6 +699,16 @@ class v8DetectionLoss:
         #     target_bboxes /= stride_tensor
         #     loss[0], loss[2] = self.bbox_loss(
         #         pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+        #     )
+        # if fg_mask.sum():
+        #     loss[0], loss[2] = self.bbox_loss(
+        #         pred_distri,
+        #         pred_bboxes,
+        #         anchor_points,
+        #         target_bboxes / stride_tensor,
+        #         target_scores,
+        #         target_scores_sum,
+        #         fg_mask,
         #     )
         if fg_mask.sum():
             # 初始化一个列表来存储每张图像的损失

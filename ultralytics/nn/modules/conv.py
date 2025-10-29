@@ -6,7 +6,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from ..modules.block import *
+# from ..modules.block import *
 __all__ = (
     "Conv",
     "Conv2",

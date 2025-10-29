@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import torch
-
+from ultralytics.nn.modules.mhafyolo import *
 from ultralytics.nn.modules import (
     AIFI,
     C1,
@@ -77,6 +77,19 @@ from ultralytics.nn.modules import (
     WaveletUnPool,
     WaveletPool,
     EUCB,
+    SDI,
+    C2f_EBlock,
+    C2f_DBlock,
+    C2f_LFEM,
+    LoGStem,
+    C2f_LEGM,
+    C2f_LSBlock,
+    HAFB,
+    C2f_DCMB,
+    C2f_Strip,
+    C2f_StripCGLU,
+    ContrastDrivenFeatureAggregation,
+    C2f_HFERB,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1006,6 +1019,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             CSP_MutilScaleEdgeInformationSelect,
             C2f_RAB,
             MANet,
+            C2f_EBlock,
+            C2f_DBlock,
+            C2f_LFEM,
+            LoGStem,
+            C2f_LEGM,
+            C2f_LSBlock,
+            C2f_DCMB,
+            RepHMS,
+            C2f_Strip,
+            C2f_StripCGLU,
+            C2f_HFERB,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1028,6 +1052,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2f_AP,
             CSP_MutilScaleEdgeInformationSelect,
             C2f_RAB,
+            C2f_EBlock,
+            C2f_DBlock,
+            C2f_LFEM,
+            C2f_LEGM,
+            C2f_LSBlock,
+            C2f_DCMB,
+            C2f_Strip,
+            C2f_StripCGLU,
+            C2f_HFERB,
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
@@ -1044,6 +1077,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in base_modules:
+            if args[0] == 'head_channel':
+                args[0] = d[args[0]]
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
@@ -1109,13 +1144,26 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2]
         elif m is asf_attention_model:
             args = [ch[f[-1]]]
-        elif m is {DySample, EUCB}:
+        elif m in {DySample, ContrastDrivenFeatureAggregation}:
             c2 = ch[f]
             args = [c2, *args]
+        elif m is EUCB:
+            # EUCB 需要 in_channels 作为第一个参数
+            c1 = ch[f]  # 输入通道数
+            c2 = c1     # 输出通道数保持不变
+            args = [c1, *args]  # 将输入通道数作为第一个参数传递
         elif m in {WaveletUnPool}:
             c2 = ch[f] // 4
         elif m in {WaveletPool}:
             c2 = ch[f] * 4
+        elif m is SDI:
+            args = [[ch[x] for x in f]]
+        elif m is HAFB:
+            if args[0] == 'head_channel':
+                args[0] = d[args[0]]
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2, *args[1:]]
         else:
             c2 = ch[f]
 
